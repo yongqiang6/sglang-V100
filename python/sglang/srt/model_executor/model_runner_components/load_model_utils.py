@@ -87,8 +87,9 @@ def maybe_downgrade_dtype_for_legacy_gpu(*, model_config: ModelConfig) -> None:
         # the per-runner truth is model_config.dtype, this is the record.
         get_context().override("ModelRunner._sm80_dtype_fallback", dtype="float16")
         model_config.dtype = torch.float16
-        if torch.cuda.get_device_capability()[1] < 5:
-            raise RuntimeError("SGLang only supports sm75 and above.")
+        # SM70 (V100) needs the V100 build of the AOT kernels; see docs/v100/README.md.
+        if torch.cuda.get_device_capability() < (7, 0):
+            raise RuntimeError("SGLang only supports sm70 and above.")
 
 
 def maybe_trigger_remote_instance_nccl_send_group(

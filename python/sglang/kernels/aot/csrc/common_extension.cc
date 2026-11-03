@@ -149,8 +149,11 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "correction_bias) -> ()");
   m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
+#if !defined(SGL_KERNEL_V100_ONLY)
+  // SM80+ only (BF16 intrinsics). On V100 the Python side falls back to Triton.
   m.def("moe_sum_reduce(Tensor input, Tensor output, float routed_scaling_factor) -> ()");
   m.impl("moe_sum_reduce", torch::kCUDA, &moe_sum_reduce);
+#endif
 
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
   m.impl("moe_sum", torch::kCUDA, &moe_sum);
@@ -181,6 +184,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("apply_shuffle_mul_sum(Tensor input, Tensor output, Tensor permutation, Tensor? factors) -> ()");
   m.impl("apply_shuffle_mul_sum", torch::kCUDA, &apply_shuffle_mul_sum);
 
+#if !defined(SGL_KERNEL_V100_ONLY)
   // DeepSeek-V4 fused indexer rope + hadamard + quant
   m.def(
       "dsv4_fused_q_indexer_rope_hadamard_quant(Tensor q_input, Tensor! q_fp8, Tensor weight, "
@@ -194,6 +198,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "bool is_neox, Tensor position_ids, float factor, float low, float high, float attention_factor, int rotary_dim) "
       "-> ()");
   m.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
+#endif  // !SGL_KERNEL_V100_ONLY
 
   /*
    * From csrc/moe/cutlass_moe/w4a8
@@ -359,6 +364,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "int pad_slot_id) -> ()");
   m.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 
+#if !defined(SGL_KERNEL_V100_ONLY)
   /*
    * From csrc/expert_sepcialization
    */
@@ -375,6 +381,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "es_sm100_mxfp8_blockscaled_grouped_quant(Tensor input, Tensor problem_sizes, Tensor expert_offsets, Tensor "
       "blockscale_offsets, Tensor quant_output, Tensor scale_factor) -> () ");
   m.impl("es_sm100_mxfp8_blockscaled_grouped_quant", &es_sm100_mxfp8_blockscaled_grouped_quant);
+#endif  // !SGL_KERNEL_V100_ONLY
 }
 
 REGISTER_EXTENSION(common_ops)

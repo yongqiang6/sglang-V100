@@ -67,6 +67,7 @@ from sglang.srt.speculative.spec_utils import (
 )
 from sglang.srt.utils import (
     get_cuda_graph_max_batch_size,
+    get_device_sm,
     get_int_env_var,
     is_flashinfer_available,
     next_power_of_2,
@@ -347,8 +348,11 @@ class FlashInferAttnBackend(AttentionBackend):
         window_kv_indptr_buf: Optional[torch.Tensor] = None,
     ):
         super().__init__()
-        self.prefill_backend = "fa2"
-        self.decode_backend = "fa2"
+        # Below SM80 the tensor-core decode and fast-plan paths crashed on V100 in
+        # the sglang-V100 fork; "auto" keeps them off. Revisit after a V100 run.
+        self.use_fa2_kernels = get_device_sm() >= 80
+        self.prefill_backend = "fa2" if self.use_fa2_kernels else "auto"
+        self.decode_backend = "fa2" if self.use_fa2_kernels else "auto"
 
         self.req_to_token_pool = model_runner.req_to_token_pool
         self.token_to_kv_pool = model_runner.token_to_kv_pool
@@ -466,6 +470,8 @@ class FlashInferAttnBackend(AttentionBackend):
             )
             self.disable_cuda_graph_kv_split = True
             envs.SGLANG_FLASHINFER_WORKSPACE_SIZE.set(2048 * 1024 * 1024)
+        if not self.use_fa2_kernels:
+            self.decode_use_tensor_cores = False
 
         self.use_paged = envs.SGLANG_FLASHINFER_USE_PAGED.get()
 
@@ -845,7 +851,7 @@ class FlashInferAttnBackend(AttentionBackend):
         else:
             raise ValueError("Invalid forward mode")
 
-        if in_capture and forward_mode.is_decode_or_idle():
+        if in_capture and forward_mode.is_decode_or_idle() and self.use_fa2_kernels:
             # fast_decode_plan needs _cached_module from the initial begin_forward
             # above, so install it only after that first plan has run.
             for w in self.decode_cuda_graph_metadata[bs]:

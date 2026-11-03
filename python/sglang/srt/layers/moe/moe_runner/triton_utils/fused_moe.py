@@ -32,6 +32,7 @@ from sglang.srt.runtime_context import get_exec, get_parallel
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
+    get_device_sm,
     is_cpu,
     is_cuda,
     is_hip,
@@ -53,6 +54,8 @@ _is_cpu = is_cpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_xpu = is_xpu()
 _is_musa = is_musa()
+# The AOT moe_sum_reduce uses BF16 intrinsics and is not built for SM70 (V100).
+_use_sgl_moe_sum_reduce = not _is_cuda or get_device_sm() >= 80
 
 
 if _is_cuda:
@@ -1017,8 +1020,14 @@ def moe_combine_topk(
                         out_hidden_states,
                         routed_scaling_factor,
                     )
-            else:
+            elif _use_sgl_moe_sum_reduce:
                 moe_sum_reduce(
+                    intermediate_cache3.view(*intermediate_cache3.shape),
+                    out_hidden_states,
+                    routed_scaling_factor,
+                )
+            else:
+                moe_sum_reduce_triton(
                     intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states,
                     routed_scaling_factor,

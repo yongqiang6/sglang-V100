@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from sgl_kernel.load_utils import _get_compute_capability
 from sgl_kernel.utils import is_arch_support_pdl
 
 try:
@@ -9,6 +10,12 @@ try:
     _has_flashinfer = True
 except ImportError:
     _has_flashinfer = False
+
+# FlashInfer's CuTe-DSL norm kernels use cp.async (SM80+); SM70 stays on the AOT kernels.
+_compute_capability = _get_compute_capability()
+_use_flashinfer_norm = _has_flashinfer and (
+    _compute_capability is None or _compute_capability >= 80
+)
 
 _FLASHINFER_NORM_SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 
@@ -113,7 +120,7 @@ def rmsnorm(
     # See: https://github.com/flashinfer-ai/flashinfer/issues/2734
     #      https://github.com/flashinfer-ai/flashinfer/pull/2733
     if (
-        _has_flashinfer
+        _use_flashinfer_norm
         and input.dtype in _FLASHINFER_NORM_SUPPORTED_DTYPES
         and not torch.compiler.is_dynamo_compiling()
     ):
@@ -153,7 +160,7 @@ def fused_add_rmsnorm(
         If None, will be automatically enabled on Hopper architecture.
     """
     if (
-        _has_flashinfer
+        _use_flashinfer_norm
         and input.dtype in _FLASHINFER_NORM_SUPPORTED_DTYPES
         and not torch.compiler.is_dynamo_compiling()
     ):
@@ -194,7 +201,7 @@ def gemma_rmsnorm(
         Gemma Normalized tensor, shape (batch_size, hidden_size).
     """
     if (
-        _has_flashinfer
+        _use_flashinfer_norm
         and input.dtype in _FLASHINFER_NORM_SUPPORTED_DTYPES
         and not torch.compiler.is_dynamo_compiling()
     ):
@@ -234,7 +241,7 @@ def gemma_fused_add_rmsnorm(
         If None, will be automatically enabled on Hopper architecture.
     """
     if (
-        _has_flashinfer
+        _use_flashinfer_norm
         and input.dtype in _FLASHINFER_NORM_SUPPORTED_DTYPES
         and not torch.compiler.is_dynamo_compiling()
     ):

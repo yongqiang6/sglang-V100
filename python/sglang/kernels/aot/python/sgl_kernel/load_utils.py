@@ -60,6 +60,11 @@ def _load_architecture_specific_ops():
     if compute_capability == 90:
         ops_subdir = "sm90"
         variant_name = "SM90 (Hopper/H100 with fast math optimization)"
+    elif compute_capability == 70:
+        # Produced only by a SGL_KERNEL_V100_ONLY=ON source build; the stock
+        # wheels carry no sm_70 cubins.
+        ops_subdir = "sm70"
+        variant_name = "SM70 (V100/Volta, built with SGL_KERNEL_V100_ONLY)"
     elif compute_capability is not None:
         ops_subdir = "sm100"
         variant_name = f"SM{compute_capability} (precise math for compatibility)"
@@ -168,6 +173,11 @@ def _load_architecture_specific_ops():
     # All attempts failed
     cuda_version = torch.version.cuda
     install_hint = "pip install --upgrade sglang-kernel"
+    if compute_capability == 70:
+        install_hint = (
+            "a source build with CMAKE_ARGS=-DSGL_KERNEL_V100_ONLY=ON "
+            "(see scripts/v100/install_v100.sh)"
+        )
 
     error_msg = f"""
 [sgl_kernel] CRITICAL: Could not load any common_ops library!
