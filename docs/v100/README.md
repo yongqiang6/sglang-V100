@@ -12,7 +12,7 @@ remaining performance layers are not ported yet.
 | 3 | Attention: TileLang prefill/decode behind `triton`, `page_size=16` default, Triton SM70 decode tuning, FP8 KV on SM70 | Done |
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ (done); TurboMind FP8 and FP16 MoE, QPN8 | In progress |
-| 6 | Speculative decoding on upstream DFlash v2 / DSpark | Not started |
+| 6 | Speculative decoding on upstream DFlash v2 / DSpark | In progress |
 | 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | Not started |
 
 ## Why CUDA 12.8 with torch cu126
@@ -218,6 +218,19 @@ config (FP16 Qwen3.6 MoE) is kept under `triton_3_5_1/`, where it was measured;
 upstream's lookup falls back to it on triton 3.8. The fork's `SGLANG_MOE_BLOCK_*`
 sweep variables are not ported; tune with `benchmark/kernels/fused_moe_triton/`.
 
+## Step 6: speculative decoding
+
+Most of the fork's speculative commits backport upstream work (DFlash v2, relay
+and WAR-barrier refactors) that current upstream already has. Ported deltas:
+
+- GDN target verify with an FP16 state pool (SM70's default) now reloads each
+  draft token's stored FP16 state before the next step, matching decode, which
+  persists FP16 after every token. It used to carry the FP32 accumulator
+  through the chain and could accept tokens decode would not produce. Upstream
+  already rounds BF16 state when matching the CuTeDSL decode; that is unchanged.
+- SM70 verify launch for Qwen3.6-27B TP4 MTP (`N=1, H=4, HV=12, K=V=128`,
+  2 or 4 draft tokens): `BV=8` (192 CTAs instead of 48), bit-identical to BV=32.
+
 ## Verification status
 
 Done without V100 hardware:
@@ -250,6 +263,10 @@ Done without V100 hardware:
   saturating on the rest (all 65536 patterns, Triton interpreter); compiles for
   `sm_70`. `test/registered/kernels/ops/kvcache/test_e5m2_satfinite.py` runs it
   on GPU.
+- Step 6: in the Triton interpreter, FP16-state chain verify equals T
+  sequential decodes bit for bit (23.6% of outputs differ without the reload),
+  and the SM70 BV=8 verify launch equals BV=32
+  (`test_fused_verify_triton_gdn.py`).
 - Step 5a: the three marlin_v100 patches apply at the pinned revision. Without
   `marlin-v100-torch-cxx20.patch` its C++17 build fails on torch 2.14's headers;
   with it, `setup_v100_marlin.sh` compiles marlin_v100 for `sm_70` with nvcc 12.8

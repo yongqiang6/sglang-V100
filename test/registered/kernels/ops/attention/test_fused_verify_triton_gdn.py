@@ -359,6 +359,109 @@ def test_mtp_single_step_decode(N: int):
 
 
 @pytest.mark.skipif(not KERNELS_AVAILABLE, reason="Kernels not available")
+@pytest.mark.parametrize("N", [1, 3])
+def test_fp16_state_chain_verify_matches_sequential_decode(N: int, device="cuda"):
+    """With an FP16 state pool, decode stores the state as FP16 after every token,
+    so a chain verify must round between draft tokens the same way; keeping the
+    FP32 accumulator across the chain accepts tokens decode would not produce."""
+    T, H, HV, K, V = 4, 4, 12, 128, 128
+    A_log, dt_bias, a, b, q, k, v, state, indices, cu_seqlens = _make_tensors(
+        N, T, H, HV, K, V, device=device
+    )
+    dt_bias, a, b, q, k, v = (x.half() for x in (dt_bias, a, b, q, k, v))
+    state = state.half()
+
+    pool = state.clone()
+    decode_cu_seqlens = torch.arange(N + 1, dtype=torch.int32, device=device)
+    decode_out = []
+    for t in range(T):
+        rows = torch.arange(N, device=device) * T + t
+        decode_out.append(
+            run_fused_mtp(
+                A_log,
+                dt_bias,
+                q[:, rows],
+                k[:, rows],
+                v[:, rows],
+                a[:, rows],
+                b[:, rows],
+                pool,
+                indices,
+                decode_cu_seqlens,
+                disable_state_update=False,
+            )
+        )
+    # [1, N, HV, V] per step -> [1, N * T, HV, V], sequence-major like the verify.
+    decode_out = torch.stack(decode_out, dim=2).flatten(1, 2)
+
+    states = torch.zeros(N, T, HV, V, K, dtype=torch.float16, device=device)
+    verify_out = run_fused_mtp(
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        a,
+        b,
+        state.clone(),
+        indices,
+        cu_seqlens,
+        intermediate_states_buffer=states,
+        intermediate_state_indices=indices,
+        cache_steps=T,
+    )
+    torch.testing.assert_close(verify_out, decode_out, rtol=0, atol=0)
+    torch.testing.assert_close(states[:, -1], pool, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not KERNELS_AVAILABLE, reason="Kernels not available")
+@pytest.mark.parametrize("T", [2, 4])
+def test_sm70_mtp_verify_launch_is_bit_exact(T: int, monkeypatch, device="cuda"):
+    """The SM70 Qwen3.6 TP4 MTP verify launch (BV=8) matches BV=32 bit for bit
+    with the FP16 state pool V100 uses."""
+    N, H, HV, K, V = 1, 4, 12, 128, 128
+    A_log, dt_bias, a, b, q, k, v, state, indices, cu_seqlens = _make_tensors(
+        N, T, H, HV, K, V, device=device
+    )
+    dt_bias, a, b, q, k, v = (x.half() for x in (dt_bias, a, b, q, k, v))
+    state = state.half()
+    monkeypatch.setattr(recurrent_module, "_is_sm70", True)
+    assert _select_recurrent_launch_config(
+        N, H, HV, K, V, False, True, cache_steps=T
+    ) == (8, 1)
+    assert _select_recurrent_launch_config(
+        N, H, HV, K, V, False, True, cache_steps=8
+    ) == (32, 1)
+
+    def run(launch_config):
+        monkeypatch.setattr(
+            recurrent_module, "_select_recurrent_launch_config", launch_config
+        )
+        buffer = torch.zeros(N, T, HV, V, K, dtype=torch.float16, device=device)
+        out = run_fused_mtp(
+            A_log,
+            dt_bias,
+            q,
+            k,
+            v,
+            a,
+            b,
+            state.clone(),
+            indices,
+            cu_seqlens,
+            intermediate_states_buffer=buffer,
+            intermediate_state_indices=indices,
+            cache_steps=T,
+        )
+        return out, buffer
+
+    out_tuned, states_tuned = run(_select_recurrent_launch_config)
+    out_default, states_default = run(lambda *args, **kwargs: (32, 1))
+    assert torch.equal(out_tuned, out_default)
+    assert torch.equal(states_tuned, states_default)
+
+
+@pytest.mark.skipif(not KERNELS_AVAILABLE, reason="Kernels not available")
 def test_verify_scratch_pitch_uses_allocated_steps():
     # Gear below the allocated step dim must not spill into the neighbor block.
     N, T, ALLOCATED = 2, 4, 8

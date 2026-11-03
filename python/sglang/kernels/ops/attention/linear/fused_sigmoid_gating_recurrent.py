@@ -18,6 +18,7 @@ _is_gfx95 = is_gfx95_supported()
 _is_sm90 = is_sm90_supported()
 _is_sm103 = is_cuda() and get_device_sm() == 103
 _is_sm107 = is_cuda() and get_device_sm() == 107
+_is_sm70 = is_cuda() and get_device_sm() == 70
 
 
 def _select_recurrent_launch_config(
@@ -76,6 +77,16 @@ def _select_recurrent_launch_config(
     ):
         # GLM TP8 DFlash verification: 256 CTAs instead of 32.
         return 4, 1
+    if (
+        _is_sm70
+        and target_verify
+        and not is_kda
+        and (n, h, hv, k, v) == (1, 4, 12, 128, 128)
+        and cache_steps in (2, 4)
+    ):
+        # Qwen3.6-27B TP4 MTP verify on V100: BV=32 takes 254 registers/thread and
+        # launches 48 CTAs; BV=8 launches 192 with the same per-key reduction.
+        return 8, 1
     if _is_sm107 and is_kda and target_verify:
         # KDA spec verify on SM107: the default BV=32 single-warp launch gives
         # heads x 4 CTAs (48 at Kimi-K3 TP8) on a 212-SM part. Each V column
@@ -220,6 +231,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     USE_GDC: tl.constexpr = False,
     MATCH_CUTEDSL_DECODE: tl.constexpr = False,
     ROUND_STATE_TO_BF16: tl.constexpr = False,
+    RELOAD_CACHED_STATE: tl.constexpr = False,
 ):
     """
     Fused kernel that combines sigmoid gating computation with recurrent delta rule update.
@@ -529,6 +541,10 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                     + o_k[:, None]
                 )
                 tl.store(cache_ptr, b_h.to(cache_ptr.dtype.element_ty), mask=mask_h)
+                # Continue from the stored low-precision state, as decode would
+                # after persisting it; a cast pair here can be folded away.
+                if RELOAD_CACHED_STATE:
+                    b_h = tl.load(cache_ptr, mask=mask_h, other=0).to(tl.float32)
 
         # A BF16 recurrent-state decode persists its state after every token.
         # Multi-token verification must make that precision boundary visible to
@@ -723,6 +739,14 @@ def fused_sigmoid_gating_delta_rule_update(
     round_state_to_bf16 = match_cutedsl_decode and (
         initial_state_source is None or initial_state_source.dtype == torch.bfloat16
     )
+    # An FP16 state pool (SM70 default) persists FP16 after every decode token, so
+    # a chain verify must round between draft tokens too or it accepts tokens that
+    # decode would not produce. Tree verify already reloads each parent state.
+    reload_cached_state = (
+        intermediate_states_buffer is not None
+        and intermediate_states_buffer.dtype == torch.float16
+        and retrieve_parent_token is None
+    )
 
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
@@ -790,6 +814,7 @@ def fused_sigmoid_gating_delta_rule_update(
         SPLIT_N_HV_GRID=split_n_hv_grid,
         MATCH_CUTEDSL_DECODE=match_cutedsl_decode,
         ROUND_STATE_TO_BF16=round_state_to_bf16,
+        RELOAD_CACHED_STATE=reload_cached_state,
         num_warps=num_warps,
         num_stages=num_stages,
         **pdl_kwargs,
