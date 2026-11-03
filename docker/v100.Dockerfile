@@ -11,7 +11,7 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV CUDA_HOME=/usr/local/cuda \
-    SGLANG_V100_MARLIN_DIR=/opt/marlin-v100 \
+    SGLANG_V100_EXT_DIR=/opt/v100-ext \
     TORCH_CUDA_ARCH_LIST=7.0 \
     NVCC_THREADS=1 \
     VIRTUAL_ENV=/opt/venv \
@@ -63,6 +63,12 @@ COPY patches/v100/marlin-v100-torch-cxx20.patch \
 RUN SGLANG_V100_DEPS_DIR=/opt/deps bash /opt/sglang/scripts/v100/setup_v100_marlin.sh \
     && rm -rf /opt/deps/marlin-v100/build
 
+# TurboMind SM70 extension: FP16 MoE, block-FP8 W8A16 and AWQ GEMMs.
+COPY python/sglang/kernels/jit/csrc/sm70_turbomind \
+     /opt/sglang/python/sglang/kernels/jit/csrc/sm70_turbomind
+RUN SGLANG_V100_DEPS_DIR=/opt/deps bash /opt/sglang/scripts/v100/setup_v100_turbomind.sh \
+    && rm -rf /opt/deps/turbomind-sm70-build
+
 # Only the AOT kernel sources invalidate this layer.
 COPY python/sglang/kernels/aot /opt/sglang/python/sglang/kernels/aot
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -92,7 +98,7 @@ ENV HF_HOME=/root/.cache/huggingface \
     TORCHINDUCTOR_CACHE_DIR=/root/sglang-v100-jit/torchinductor
 
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /opt/marlin-v100 /opt/marlin-v100
+COPY --from=builder /opt/v100-ext /opt/v100-ext
 COPY --from=builder /opt/deps/flashinfer-sm70 /opt/deps/flashinfer-sm70
 COPY --from=builder /opt/sglang /opt/sglang
 COPY docker/v100-entrypoint.sh /usr/local/bin/v100-entrypoint

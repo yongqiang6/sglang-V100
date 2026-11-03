@@ -1282,8 +1282,23 @@ class Envs:
     SGLANG_V100_GDN_VALUE_BLOCK = EnvInt(32)
     SGLANG_V100_GDN_K_REUSE_MODE = EnvInt(3)
     SGLANG_V100_GDN_COLUMN_GROUPS_PER_BLOCK = EnvInt(None)
-    # Extra directory searched for the marlin_v100 libraries (setup_v100_marlin.sh).
-    SGLANG_V100_MARLIN_DIR = EnvStr(None)
+    # TurboMind FP16 MoE (scripts/v100/setup_v100_turbomind.sh) for FP16 MoE layers.
+    SGLANG_SM70_FP16_MOE = EnvBool(True)
+    # Block-FP8 [128, 128] linear: auto/turbomind (TurboMind W8A16) or marlin.
+    SGLANG_SM70_FP8_BACKEND = EnvStr("auto")
+    SGLANG_SM70_FP8_DECODE_QPN8 = EnvBool(True)
+    SGLANG_SM70_FP8_QPN8_FASTDEC = EnvBool(True)
+    SGLANG_SM70_FP8_PREFILL_EXACT_DENSE = EnvBool(True)
+    SGLANG_SM70_FP8_PREFILL_MIN_TOKENS = EnvInt(3920)
+    # AWQ dense layers on TurboMind W4A16 (group 32/64/128).
+    SGLANG_SM70_AWQ_TURBOMIND = EnvBool(True)
+    SGLANG_SM70_AWQ_PREFILL_EXACT_DENSE = EnvBool(True)
+    # Custom all-reduce on >2 GPUs without NVLink (PCIe P2P, e.g. V100 PCIe or
+    # one-switch SXM2): one-shot push only, for inputs up to the byte cap.
+    SGLANG_CUSTOM_AR_ALLOW_PCIE = EnvBool(False)
+    SGLANG_CUSTOM_AR_PCIE_MAX_BYTES = EnvInt(128 * 1024)
+    # Extra directory searched for the marlin_v100 and TurboMind SM70 libraries.
+    SGLANG_V100_EXT_DIR = EnvStr(None)
 
     # ===================================================================
     # Quantization

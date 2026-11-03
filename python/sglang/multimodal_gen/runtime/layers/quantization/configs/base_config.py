@@ -39,6 +39,8 @@ class QuantizationConfig(SRTQuantizationConfig):
     checkpoint_uses_comfy_quantization: bool = False
     supports_srt_linear_layers: bool = False
     supports_quantized_embeddings: bool = False
+    # Online formats that quantize FP16 weights after loading (V100 W4A16).
+    requires_fp16_source: bool = False
 
     def get_scaled_act_names(self) -> list[str]:
         return []

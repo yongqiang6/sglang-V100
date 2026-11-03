@@ -162,6 +162,19 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "12.0"):
             self.resolve(AttentionBackendEnum.HYBRID_WINDOW_ATTN_H3)
 
+    def test_tilelang_fa_v100_selection_is_sm70_only(self):
+        FakeCudaPlatform.device_capability = DeviceCapability(7, 0)
+        self.assertEqual(
+            self.resolve(AttentionBackendEnum.TILELANG_FA_V100),
+            "sglang.multimodal_gen.runtime.layers.attention.backends."
+            "tilelang_fa_v100.TileLangFlashAttentionV100Backend",
+        )
+        _cached_get_attn_backend.cache_clear()
+        FakeCudaPlatform.device_capability = DeviceCapability(8, 0)
+        self.assertEqual(
+            self.resolve(AttentionBackendEnum.TILELANG_FA_V100), SDPA_BACKEND_CLS_STR
+        )
+
     def test_default_backend_uses_torch_sdpa_on_sm120(self):
         FakeCudaPlatform.is_sm120_device = True
 

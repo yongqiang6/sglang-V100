@@ -3,12 +3,12 @@ index b9f437e..73b2e01 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.26)
- 
+
  project(marlin_v100_extensions LANGUAGES CXX)
- 
+
 -set(CMAKE_CXX_STANDARD 17)
 +# torch 2.14 headers require C++20.
 +set(CMAKE_CXX_STANDARD 20)
  set(CMAKE_CXX_STANDARD_REQUIRED ON)
- 
+
  include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)

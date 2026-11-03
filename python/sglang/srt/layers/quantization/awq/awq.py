@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
 
+from sglang.kernels.ops.gemm import sm70_turbomind
+from sglang.srt.environ import envs
 from sglang.srt.layers.linear import LinearBase
 from sglang.srt.layers.moe import MoeRunnerConfig
 from sglang.srt.layers.quantization.base_config import (
@@ -113,8 +115,10 @@ class AWQConfig(QuantizationConfig):
             raise NotImplementedError(
                 'NPU hardware does not support "get_min_capability" feature.'
             )
-        else:
-            return 75
+        # SM70 runs AWQ dense layers on the TurboMind W4A16 GEMM when installed.
+        if envs.SGLANG_SM70_AWQ_TURBOMIND.get() and sm70_turbomind.ops() is not None:
+            return 70
+        return 75
 
     @staticmethod
     def get_config_filenames() -> List[str]:

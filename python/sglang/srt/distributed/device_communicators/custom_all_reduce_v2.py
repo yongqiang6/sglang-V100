@@ -57,6 +57,7 @@ from sglang.srt.utils.cuda_vmm_utils import (
     is_vmm_pointer,
 )
 
+from .configs.custom_all_reduce_v2 import AllReduceConfig as BaseAllReduceConfig
 from .configs.custom_all_reduce_v2 import (
     get_all_reduce_config,
     get_supported_world_sizes,
@@ -108,6 +109,25 @@ class AllReduceConfig(NamedTuple):
     algo: AllReduceAlgo
     use_graph: bool = False
     use_multicast: bool = False
+
+
+def pcie_one_shot_push_config(
+    config: BaseAllReduceConfig, max_push_size: int
+) -> BaseAllReduceConfig:
+    """Over PCIe P2P the pull kernels spin forever and one-shot push beats NCCL
+    only on small inputs (4x V100 SXM2 on one PLX switch, CUDA graph: 3.9 vs
+    19.7 us at 4 KB, 45 vs 51 us at 128 KB, 120 vs 84 us at 384 KB): select
+    one-shot push up to ``max_push_size`` and nothing else. The caller also
+    disables the pull plane, which clips the pull and multicast ranges to zero."""
+
+    def one_shot_push_only(heuristic):
+        return heuristic._replace(
+            one_shot_push_threshold=max_push_size, two_shot_push_threshold=0
+        )
+
+    return config._replace(
+        graph=one_shot_push_only(config.graph), eager=one_shot_push_only(config.eager)
+    )
 
 
 class CustomAllReduceV2:
@@ -171,6 +191,12 @@ class CustomAllReduceV2:
             graph=force_thresholds(base_config.graph),
             eager=force_thresholds(base_config.eager),
         )
+        if envs.SGLANG_CUSTOM_AR_ALLOW_PCIE.get():
+            max_pull_size = 0
+            max_push_size = min(
+                max_push_size, envs.SGLANG_CUSTOM_AR_PCIE_MAX_BYTES.get()
+            )
+            base_config = pcie_one_shot_push_config(base_config, max_push_size)
         # Zero on either pull knob opts out of the pull half entirely: no
         # pull plane at all, and every pull algo disabled below by clipping
         # its threshold to 0. Push-only callers (the fused qk-norm instances)

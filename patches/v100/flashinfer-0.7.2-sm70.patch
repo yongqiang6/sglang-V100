@@ -454,7 +454,7 @@ diff --git a/include/flashinfer/sampling.cuh b/include/flashinfer/sampling.cuh
 index ca260865..450c4ec1 100644
 --- a/include/flashinfer/sampling.cuh
 +++ b/include/flashinfer/sampling.cuh
-@@ -37,8 +37,33 @@
+@@ -37,7 +37,32 @@
  #include "utils.cuh"
  #include "vec_dtypes.cuh"
 
@@ -487,4 +487,3 @@ index ca260865..450c4ec1 100644
 +#endif
 
  namespace flashinfer {
-

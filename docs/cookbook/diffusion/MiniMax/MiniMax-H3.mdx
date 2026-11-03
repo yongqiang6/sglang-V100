@@ -493,6 +493,45 @@ HCCL_BUFFSIZE=256 sglang serve \
   --component-residency text_encoder=layerwise-offload
 ```
 
+### Serve MiniMax-H3 on V100 (SM70)
+
+Volta has no BF16 or FlashAttention, so build the V100 environment first
+(`docs/v100/README.md`, which also builds the TurboMind SM70 library). On SM70
+every BF16 H3 component runs in FP16 automatically.
+`--quantization v100_w4a16_awq` quantizes the DiT linear layers online to
+4-bit groupwise weights (round-to-nearest, group 128) for TurboMind's W4A16
+GEMM, and `tilelang_fa_v100` runs the DiT's packed dense attention with a
+TileLang kernel. This profile was validated on 4× V100-SXM2 32 GB with the
+sglang-V100 fork. On the current code it has passed unit tests and `sm_70`
+compile checks only, so it has not been rerun on a V100.
+
+```bash 4×V100 32GB
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+NCCL_P2P_LEVEL=NVL \
+sglang serve \
+  --model-path MiniMaxAI/MiniMax-H3 \
+  --model-variant fl2va \
+  --num-gpus 4 \
+  --tp-size 4 \
+  --sp-degree 1 \
+  --ulysses-degree 1 \
+  --ring-degree 1 \
+  --performance-mode speed \
+  --quantization v100_w4a16_awq \
+  --attention-backend tilelang_fa_v100 \
+  --dit-cpu-offload false \
+  --text-encoder-cpu-offload \
+  --vae-cpu-offload \
+  --enable-torch-compile false \
+  --warmup-mode off \
+  --port 30010
+```
+
+The fork's second profile, W8A16, stores per-channel INT8 weights, dequantizes
+them for cuBLAS, and offloads the DiT. To use it, change the command above in
+three places: use `--quantization v100_w8a16`, replace `--dit-cpu-offload false`
+with `--dit-cpu-offload`, and drop `--warmup-mode off`.
+
 ## 4. Generate video and audio
 
 `num_inference_steps: N` executes **N denoising updates** over N+1 sigma

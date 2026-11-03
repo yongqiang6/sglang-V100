@@ -121,6 +121,9 @@ CMAKE_ARGS="-DSGL_KERNEL_V100_ONLY=ON -DSGL_KERNEL_COMPILE_THREADS=$NVCC_THREADS
 log "Building marlin_v100 (SM70 GPTQ/AWQ/FP8 Marlin kernels)"
 SGLANG_V100_DEPS_DIR="$DEPS_ROOT" bash "$REPO_ROOT/scripts/v100/setup_v100_marlin.sh"
 
+log "Building the TurboMind SM70 extension (FP16 MoE, block-FP8 and AWQ GEMMs)"
+SGLANG_V100_DEPS_DIR="$DEPS_ROOT" bash "$REPO_ROOT/scripts/v100/setup_v100_turbomind.sh"
+
 log "Keeping only torch's CUDA 12 NCCL"
 python -m pip uninstall -y nvidia-nccl-cu13 || true
 NCCL_PIN="$(python - <<'PY'

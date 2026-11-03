@@ -34,7 +34,7 @@ MOE_LIBRARY = "_sm70_marlin_v100_moe.abi3.so"
 
 def library_dirs() -> list[str]:
     dirs = [os.path.dirname(os.path.abspath(__file__))]
-    extra = envs.SGLANG_V100_MARLIN_DIR.get()
+    extra = envs.SGLANG_V100_EXT_DIR.get()
     if extra:
         dirs.insert(0, extra)
     return dirs

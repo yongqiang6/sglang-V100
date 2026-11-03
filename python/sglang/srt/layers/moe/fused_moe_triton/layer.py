@@ -347,6 +347,14 @@ def _validate_deepep_v2_quant_method(quant_method) -> None:
         )
 
 
+def _use_sm70_fp16_moe(runner_config, params_dtype, with_bias) -> bool:
+    if not get_moe_a2a_backend().is_none():
+        return False
+    from sglang.srt.layers.quantization.sm70_fp16_moe import sm70_fp16_moe_supported
+
+    return sm70_fp16_moe_supported(runner_config, params_dtype, with_bias)
+
+
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
@@ -545,6 +553,14 @@ class FusedMoE(torch.nn.Module):
         else:
             if self.quant_method is None and quant_config is not None:
                 self.quant_method = quant_config.get_quant_method(self, prefix)
+            if self.quant_method is None and _use_sm70_fp16_moe(
+                self.moe_runner_config, params_dtype, with_bias
+            ):
+                from sglang.srt.layers.quantization.sm70_fp16_moe import (
+                    SM70FP16MoEMethod,
+                )
+
+                self.quant_method = SM70FP16MoEMethod()
             if self.quant_method is None:
                 self.quant_method = UnquantizedFusedMoEMethod(
                     self.use_triton_kernels,

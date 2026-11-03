@@ -2,8 +2,8 @@
 
 This branch re-ports the V100 work from the `sglang-V100` fork (forked from
 upstream `cdd06011a`, 2026-06-01) onto current upstream SGLang, layer by layer.
-Steps 1-4 (environment, base runtime, attention, GDN) are in place; the
-remaining performance layers are not ported yet.
+All seven steps are ported. Each step lists what was left out on purpose and
+what still needs a V100 to validate.
 
 | Step | Scope | Status |
 | --- | --- | --- |
@@ -11,9 +11,9 @@ remaining performance layers are not ported yet.
 | 2 | Base runtime: SM70 floor, `SGL_KERNEL_V100_ONLY` AOT build, FlashInfer SM<80 paths, `moe_sum_reduce` fallback | Done |
 | 3 | Attention: TileLang prefill/decode behind `triton`, `page_size=16` default, Triton SM70 decode tuning, FP8 KV on SM70 | Done |
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
-| 5 | Quantization: Marlin-V100 GPTQ/AWQ (done); TurboMind FP8 and FP16 MoE, QPN8 | In progress |
-| 6 | Speculative decoding on upstream DFlash v2 / DSpark | In progress |
-| 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | In progress (NVFP4 done) |
+| 5 | Quantization: Marlin-V100 GPTQ/AWQ/FP8; TurboMind FP16 MoE, block-FP8 W8A16 and AWQ W4A16; QPN8 FP8 decode | Done |
+| 6 | Speculative decoding on upstream DFlash v2 / DSpark | Done (TileLang native verify not ported) |
+| 7 | NVFP4, PCIe custom all-reduce, MiniMax-H3 on V100 | Done (Qwen3.8 SM70 fusions not ported) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -53,6 +53,13 @@ Docker:
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/v100.Dockerfile -t sglang-v100 .
 ```
+
+Both build the two external V100 kernel libraries, marlin_v100
+(`scripts/v100/setup_v100_marlin.sh`) and the TurboMind SM70 extension
+(`scripts/v100/setup_v100_turbomind.sh`); either script can be rerun on its
+own in an activated environment. They install into the SGLang package, or into
+`SGLANG_V100_EXT_DIR` when it is set (the image uses `/opt/v100-ext`); the
+runtime searches both.
 
 Validate an environment (add `--no-gpu` on a machine without a V100):
 
@@ -137,7 +144,7 @@ name and changes what it builds on SM70:
   `environ.py` under "NVIDIA V100 (SM70)" with their old names. Boolean values
   now follow `EnvBool` (`true/1/yes/y`, `false/0/no/n`; `on/off` is no longer accepted).
 
-Deferred: native linear speculative verify in the TileLang backend (step 6).
+Not ported: native linear speculative verify in the TileLang backend (see step 6).
 
 E5M2 KV writes: `Tensor.to(torch.float8_e5m2)` rounds FP16 magnitudes above
 57344 to infinity. On SM70 `MHATokenToKVPool` writes E5M2 through
@@ -173,9 +180,8 @@ become one more backend plus SM70 defaults:
   since the model runs in FP16 and FP16 conv states cannot be written into a
   BF16 cache. `SGLANG_MAMBA_CONV_DTYPE` / `SGLANG_MAMBA_SSM_DTYPE` still win.
 
-Not ported: the fork's `fused_sigmoid_gating` FP16 verify fix and SM70 `BV=8`
-recurrent tweak (step 6, with speculative decoding) and the Qwen3.8 QSA/HC
-fusions (step 7).
+The fork's FP16-state verify fix and SM70 `BV=8` verify launch are ported with
+speculative decoding (step 6); its Qwen3.8 QSA/HC fusions are not (step 7).
 
 ## Step 5a: Marlin GPTQ / AWQ on SM70 (marlin_v100)
 
@@ -184,7 +190,7 @@ empty bodies below SM80: on V100 they launch and write nothing. The fork's fix
 is kept: the external [marlin_v100](https://github.com/zhinianqin/marlin_v100)
 library (vLLM op schemas, real SM70 kernels), pinned and patched by
 `scripts/v100/setup_v100_marlin.sh` (called from `install_v100.sh` and the
-Docker image; `SGLANG_V100_MARLIN_DIR` adds a search directory). The patches:
+Docker image; `SGLANG_V100_EXT_DIR` adds a search directory). The patches:
 C++20 for torch 2.14's headers (marlin_v100 targets torch 2.10), and the fork's
 measured MoE CTA/split-K selections. The fork's bf16-compat patch is dropped; it
 is only needed below CUDA 12.8.
@@ -218,6 +224,47 @@ config (FP16 Qwen3.6 MoE) is kept under `triton_3_5_1/`, where it was measured;
 upstream's lookup falls back to it on triton 3.8. The fork's `SGLANG_MOE_BLOCK_*`
 sweep variables are not ported; tune with `benchmark/kernels/fused_moe_triton/`.
 
+## Step 5b: TurboMind SM70 GEMMs and QPN8
+
+The fork's fastest V100 paths use LMDeploy TurboMind GEMMs (built from
+1Cat-vLLM's SM70 port) instead of Marlin. `setup_v100_turbomind.sh` builds them
+as one torch library, `_sm70_turbomind_v100.so` (`torch.ops.sglang_sm70_turbomind`),
+from pinned sparse checkouts of 1Cat-vLLM (`6ada86ed`) and CUTLASS v4.4.2
+headers, plus the fork's two sources kept in
+`kernels/jit/csrc/sm70_turbomind/`. `kernels/ops/gemm/sm70_turbomind.py` loads
+it on SM70 only; without it every layer below keeps its Marlin or Triton path.
+
+- FP16 MoE (`quantization/sm70_fp16_moe.py`): unquantized FP16 `FusedMoE`
+  layers take TurboMind's grouped GEMM (gate/up interleaved at load, fused
+  gated SiLU, permute/unpermute from the same library). It covers the contract
+  the fork validated: gated SiLU, no bias, no clamps or `gemm1_alpha`, router
+  weights applied after the experts, `routed_scaling_factor` 1 and no expert
+  parallelism or A2A backend. Other layers stay on Triton.
+  `SGLANG_SM70_FP16_MOE=0` disables it.
+- Block-FP8 linear (`quantization/sm70_turbomind_fp8.py`): `[128, 128]`-block
+  FP8 checkpoints run TurboMind W8A16 instead of FP8 Marlin
+  (`SGLANG_SM70_FP8_BACKEND=auto|turbomind|marlin`; `turbomind` fails if it
+  cannot be used). For the measured Qwen3.8-27B-FP8 TP4 shapes, decode
+  (M <= 8) uses QPN8 and prefills of `SGLANG_SM70_FP8_PREFILL_MIN_TOKENS`
+  (3920) tokens or more dequantize into a shared 85 MiB workspace and run a
+  dense FP16 GEMM. `SGLANG_SM70_FP8_DECODE_QPN8`, `SGLANG_SM70_FP8_QPN8_FASTDEC`
+  and `SGLANG_SM70_FP8_PREFILL_EXACT_DENSE` turn those off.
+- QPN8 (`kernels/ops/gemm/sm70_qpn8.py`, `kernels/jit/csrc/gemm/sm70_fp8_qpn8_decode.cu`,
+  adapted from [v100-skinny](https://github.com/dnv2003/v100-skinny), MIT):
+  streams packed E4M3 codes and decodes them into `mma.sync.m8n8k4` operands.
+  JIT-built on first use.
+- AWQ (`quantization/sm70_turbomind_awq.py`): with the library loaded,
+  `AWQConfig` admits SM70, and both the AWQ and AWQ-Marlin linear kernels
+  repack group-32/64/128 weights once for TurboMind W4A16; selected
+  Qwen3.6-27B-AWQ TP4 shapes run 4096-token prefill chunks as dequantize plus
+  dense GEMM. `SGLANG_SM70_AWQ_TURBOMIND` / `SGLANG_SM70_AWQ_PREFILL_EXACT_DENSE`
+  turn them off. AWQ MoE layers stay on marlin_v100.
+
+Not ported: the fork's fused gated-SiLU epilogues for FP8 `gate_up_proj`
+(QPN8 and TurboMind W8A16), which make the linear return `silu(gate) * up` and
+need the model's MLP to skip its own activation; and its TurboMind E5M2 KV
+writer, which step 3 replaced with a Triton cast.
+
 ## Step 6: speculative decoding
 
 Most of the fork's speculative commits backport upstream work (DFlash v2, relay
@@ -239,6 +286,11 @@ Not ported, by design:
 - The fork's DFlash sampling changes (penalties, min-p, seeded coins): they are
   model-agnostic and written against the fork's DFlash, which upstream's
   DFlash v2 has since replaced; they are not V100 adaptations.
+- Native linear verify and the long-context DFlash paths in the TileLang
+  attention backend. Upstream runs target verify inside CUDA graphs, where the
+  ported backend uses the inherited Triton path; the fork's TileLang verify
+  kernel still compiles for `sm_70` (step 3), but switching verify to it needs
+  a V100 to check it against Triton first.
 
 ## Step 7: Qwen3.8 Flash Next and MiniMax-H3
 
@@ -256,10 +308,34 @@ step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
   on SM70 it is computed from the FP32 checkpoint value. FP16 activations only
   (always the case on V100).
 
-Not ported yet: the fork's Qwen3.8 NVFP4 decode kernel and per-shape Marlin
-geometry selection (`sm70_nvfp4_moe_decode`), the SM70 Qwen fusions
-(`sm70_qwen_fusions`, HC mix/gate, dense GEMV), PLE offload changes, the
-PCIe P2P custom all-reduce, and MiniMax-H3 diffusion on V100.
+- PCIe custom all-reduce: upstream disables custom all-reduce above two GPUs
+  without full NVLink. `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` keeps it (V100 PCIe
+  cards, or SXM2 boards whose GPUs are not all NVLink peers) and restricts
+  `CustomAllReduceV2` to one-shot push for messages up to
+  `SGLANG_CUSTOM_AR_PCIE_MAX_BYTES` (128 KiB, decode-sized); pull and two-shot
+  modes are off and larger messages use NCCL. Off by default, as in the fork.
+- MiniMax-H3 (`multimodal_gen`):
+  - On SM70, `validate_server_args` runs every BF16 component (DiT, VAEs, text
+    encoders) in FP16 and keeps FP32 ones; an explicit BF16
+    `--component-precisions` entry is rejected.
+  - `--attention-backend tilelang_fa_v100` selects a diffusion backend whose
+    packed varlen attention for FP16, non-causal, head-dim-128 inputs (H3's
+    contract) runs the fork's TileLang kernel
+    (`kernels/ops/attention/tilelang_dense_varlen_sm70.py`); every other call
+    is SDPA. It resolves to SDPA on other GPUs.
+  - `--quantization v100_w4a16_awq` quantizes the rank-local DiT linear
+    weights online (round-to-nearest, asymmetric UINT4, group 128, AWQ
+    layout) and runs them on TurboMind's W4A16 GEMM; `--quantization
+    v100_w8a16` stores per-channel INT8 and dequantizes for cuBLAS. Both load
+    the DiT in FP16 (`QuantizationConfig.requires_fp16_source`), honor
+    `--quantization-ignored-layers` and saturate FP16 overflow. The deployment
+    command is in the MiniMax-H3 cookbook page.
+
+Not ported: the fork's Qwen3.8 NVFP4 decode kernel and per-shape Marlin
+geometry selection (`sm70_nvfp4_moe_decode`), its SM70 Qwen fusions
+(`sm70_qwen_fusions`, HC mix/gate, dense GEMV) and its PLE offload changes.
+They are written against the fork's Qwen3.8 model code, which upstream's
+`qwen4_exp.py` restructured, and need a V100 to re-tune.
 
 ## Verification status
 
@@ -302,12 +378,33 @@ Done without V100 hardware:
   (`test_fused_verify_triton_gdn.py`).
 - Step 5a: the three marlin_v100 patches apply at the pinned revision. Without
   `marlin-v100-torch-cxx20.patch` its C++17 build fails on torch 2.14's headers;
-  with it, `setup_v100_marlin.sh` compiles marlin_v100 for `sm_70` with nvcc 12.8
-  (full build and op registration not yet confirmed here). The SM70 metadata
+  with it, `setup_v100_marlin.sh` builds marlin_v100 for `sm_70` with nvcc 12.8.
+  Here 5 of its 25 objects were compiled, including the dense u4 and u4b8 GEMMs.
+  Each GEMM unit takes 45-50 minutes serially and peaks at 7.3 GiB in `cicc`,
+  so the script budgets 10 GiB per job. The link and op registration were not
+  reached. The SM70 metadata
   and dispatch contracts are covered by
   `test/registered/unit/layers/quantization/test_sm70_marlin_v100.py`.
 
+- Step 5b: the fork's `fp16_moe_gemm.cu`, the ported `bindings.cpp` and the
+  QPN8 kernel compile for `sm_70` with nvcc 12.8 against torch 2.14.1's
+  headers. Layer selection (which FP16 MoE, FP8 and AWQ layers take TurboMind,
+  and that a forced `turbomind` backend fails without it) is covered by
+  `test/registered/unit/layers/quantization/test_sm70_turbomind.py`.
+  From empty source directories, `setup_v100_turbomind.sh` fetches both
+  pinned sparse checkouts and builds the library with nvcc 12.8. That took 14
+  minutes at `MAX_JOBS=1` and under 3 GiB per compiler process, producing only
+  `sm_70` cubins. Every op the Python layers call is registered, and
+  `check_v100_env.py --no-gpu` finds the library through `SGLANG_V100_EXT_DIR`.
+- Step 7: the PCIe all-reduce mode is covered by
+  `test_custom_all_reduce_v2_capability.py::test_pcie_config_selects_only_one_shot_push`.
+  For MiniMax-H3, the TileLang dense varlen kernel compiles for `sm_70`;
+  backend selection, FP16 admission and the W4A16/W8A16 contracts (AWQ nibble
+  order, error within half a quantization step, FP16 DiT loading) are covered
+  by `test_cuda_attention_backend.py`, `test_minimax_h3_admission.py` and
+  `test_v100_quantization.py` under `multimodal_gen/test/unit/`.
+
 Still needs a V100: `check_v100_env.py` without `--no-gpu`, serving a model,
-CUDA graph capture, the FlashInfer JIT attention paths, and numerical checks of
-the TileLang and FP8 Triton attention and of the TileLang GDN kernels against
-a reference.
+CUDA graph capture, the FlashInfer JIT attention paths, numerical checks of
+the TileLang and FP8 Triton attention, the TileLang GDN kernels and the
+TurboMind and QPN8 GEMMs against a reference, and an H3 generation.

@@ -2,7 +2,7 @@ diff --git a/csrc/moe/marlin_moe_wna16/sm70_marlin_gemm.cuh b/csrc/moe/marlin_mo
 --- a/csrc/moe/marlin_moe_wna16/sm70_marlin_gemm.cuh
 +++ b/csrc/moe/marlin_moe_wna16/sm70_marlin_gemm.cuh
 @@ -389,6 +389,42 @@ inline bool sm70_marlin_moe_try_select_poolside_laguna_s_2_1_int4_params(
- 
+
    return false;
  }
 +
@@ -41,7 +41,7 @@ diff --git a/csrc/moe/marlin_moe_wna16/sm70_marlin_gemm.cuh b/csrc/moe/marlin_mo
 +
 +  return false;
 +}
- 
+
  inline bool sm70_marlin_moe_try_select_quanttrio_minimax_m2_7_awq_params(
      Sm70MarlinMoeAutoParamsContext const& ctx,
 @@ -2352,6 +2388,11 @@ inline Sm70MarlinAutoParams sm70_marlin_moe_auto_stage_params(

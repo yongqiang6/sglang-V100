@@ -1053,14 +1053,20 @@ def _resolve_quant_config(
                 "such as owner/repo:Q4_K_M)."
             )
 
-        # Online-quant convention: for `fp8`, `mxfp4` and `convrot_int8`, a
-        # no-arg QuantizationConfig() selects the post-load path -- weights
-        # load in source dtype and are quantized in
-        # process_weights_after_loading. Only those three configs take
-        # --quantization-ignored-layers.
+        # Online-quant convention: for `fp8`, `mxfp4`, `convrot_int8` and the
+        # V100 formats, a no-arg QuantizationConfig() selects the post-load
+        # path -- weights load in source dtype (FP16 for the V100 formats) and
+        # are quantized in process_weights_after_loading. Only these configs
+        # take --quantization-ignored-layers.
         quant_cls = get_quantization_config(server_args.quantization)
         quant_kwargs = {}
-        if server_args.quantization in {"fp8", "mxfp4", "convrot_int8"}:
+        if server_args.quantization in {
+            "fp8",
+            "mxfp4",
+            "convrot_int8",
+            "v100_w4a16_awq",
+            "v100_w8a16",
+        }:
             quant_kwargs["ignored_layers"] = getattr(
                 server_args, "quantization_ignored_layers", None
             )
@@ -1121,6 +1127,8 @@ def _resolve_target_param_dtype(
     nunchaku_config: Optional[NunchakuConfig],
     server_args: ServerArgs,
 ) -> Optional[torch.dtype]:
+    if quant_config is not None and quant_config.requires_fp16_source:
+        return torch.float16
     if quant_config is not None or nunchaku_config is not None:
         return None
     return resolve_precision(server_args, "dit", precision_attr="dit_precision")

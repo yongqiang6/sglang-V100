@@ -559,6 +559,32 @@ class _FP8FlashAttentionSM120BackendResolver(_CudaAttentionBackendResolver):
             return AttentionBackendEnum.TORCH_CUDNN_SDPA
 
 
+class _TileLangFlashAttentionV100BackendResolver(_CudaAttentionBackendResolver):
+    backend = AttentionBackendEnum.TILELANG_FA_V100
+
+    # TileLang dense packed attention for V100 (FP16, head_dim 128, non-causal
+    # varlen); the backend itself serves other calls through SDPA.
+    @classmethod
+    def resolve(cls, platform) -> str | AttentionBackendEnum:
+        if platform.get_device_capability() != (7, 0):
+            logger.warning(
+                "tilelang_fa_v100 attention needs an SM70 device; falling back to Torch SDPA."
+            )
+            return AttentionBackendEnum.TORCH_SDPA
+        try:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.tilelang_fa_v100 import (  # noqa: F401
+                TileLangFlashAttentionV100Backend,
+            )
+
+            return "sglang.multimodal_gen.runtime.layers.attention.backends.tilelang_fa_v100.TileLangFlashAttentionV100Backend"
+        except ImportError as error:
+            logger.warning(
+                "tilelang_fa_v100 attention backend failed to import (%s); falling back to Torch SDPA.",
+                error,
+            )
+            return AttentionBackendEnum.TORCH_SDPA
+
+
 _CUDA_ATTENTION_BACKEND_RESOLVERS = {
     resolver.backend: resolver
     for resolver in (
@@ -583,6 +609,7 @@ _CUDA_ATTENTION_BACKEND_RESOLVERS = {
         _FlashAttention2BackendResolver,
         _FlashAttentionBackendResolver,
         _FP8FlashAttentionSM120BackendResolver,
+        _TileLangFlashAttentionV100BackendResolver,
     )
 }
 

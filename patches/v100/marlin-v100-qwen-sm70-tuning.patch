@@ -30,7 +30,7 @@ index 86550a9..f5846d6 100644
 @@ -277,6 +283,114 @@ inline bool sm70_marlin_moe_try_select_quanttrio_qwen3_5_122b_a10b_awq_params(
    return false;
  }
- 
+
 +inline bool sm70_marlin_moe_try_select_qwen3_5_122b_a10b_gptq_int4_params(
 +    Sm70MarlinMoeAutoParamsContext const& ctx,
 +    Sm70MarlinAutoParams& params) {

@@ -101,3 +101,32 @@ def test_supports_push(disabled, has_multicast, nbytes, num_blocks, expected):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_pcie_config_selects_only_one_shot_push():
+    """Over PCIe P2P the pull kernels never finish and two-shot push is untested,
+    so the opt-in config must route every size to one-shot push or to NCCL."""
+    from sglang.srt.distributed.device_communicators.configs.custom_all_reduce_v2 import (
+        MB,
+        AllReduceConfig,
+        Heuristic,
+    )
+
+    # The table SM70 (no tuned entry) uses: 1 MB one-shot crossovers.
+    default = AllReduceConfig(
+        graph=Heuristic(1 * MB, 1 * MB, 16 * MB),
+        eager=Heuristic(1 * MB, 1 * MB, 16 * MB),
+        num_push_blocks=80,
+        num_pull_blocks=80,
+        num_mc_blocks=None,
+    )
+    cap = 128 * 1024
+    config = custom_all_reduce_v2.pcie_one_shot_push_config(default, cap).clip(
+        max_push_bytes=cap, max_pull_bytes=0, world_size=4
+    )
+    for heuristic in (config.graph, config.eager):
+        assert heuristic.one_shot_push_threshold == cap
+        assert heuristic.two_shot_push_threshold == 0
+        assert heuristic.one_shot_pull_threshold == 0
+        assert heuristic.two_shot_pull_threshold == 0
+        assert heuristic.mc.max_bytes == 0

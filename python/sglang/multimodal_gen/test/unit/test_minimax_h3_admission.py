@@ -837,3 +837,39 @@ def test_mps_admission_requires_layerwise_residency_for_every_h3_component():
         modes["audio_vae"] = RESIDENT
         with pytest.raises(ValueError, match="audio_vae"):
             MiniMaxH3PipelineConfig.validate_server_args(config, server_args)
+
+
+def test_v100_admission_runs_bf16_components_in_fp16():
+    """Volta has no BF16 execution: on SM70 H3's BF16 components run in FP16,
+    FP32 choices are kept, and an explicit BF16 component override is rejected."""
+    from sglang.multimodal_gen.runtime.platforms.interface import DeviceCapability
+
+    config = MiniMaxH3PipelineConfig()
+    server_args = SimpleNamespace(
+        component_precisions={},
+        component_attention_backends={},
+        attention_backend=None,
+        ring_degree=1,
+        performance_mode="speed",
+        resolve_component_attention_backend=lambda *_names: (None, None),
+    )
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(
+            current_platform,
+            "get_device_capability",
+            return_value=DeviceCapability(7, 0),
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.layers.attention.selector.get_attn_backend"
+        ),
+    ):
+        MiniMaxH3PipelineConfig.validate_server_args(config, server_args)
+        assert config.dit_precision == "fp16"
+        assert config.text_encoder_precisions == ("fp16",)
+        assert config.vae_precision == "fp32"
+        assert config.audio_vae_precision == "fp32"
+
+        server_args.component_precisions = {"transformer": "bf16"}
+        with pytest.raises(ValueError, match="BF16"):
+            MiniMaxH3PipelineConfig.validate_server_args(config, server_args)

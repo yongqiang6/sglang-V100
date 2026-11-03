@@ -130,6 +130,14 @@ backend.
       <td>Data-free INT8 ConvRot W8A8 at load time, per layer on the fused JIT-compiled ops (CC 9.0, 10.0, 12.0, 12.1) or on <code>comfy_kitchen.int8_linear</code> (Turing+); <code>SGLANG_DIFFUSION_CONVROT_INT8_BACKEND</code> forces one. Layers whose input dim is not divisible by the group size stay in BF16. TP, LoRA, FSDP and memory notes under ConvRot INT8 below.</td>
     </tr>
     <tr>
+      <td><code>v100_w4a16_awq</code> / <code>v100_w8a16</code> (online quantization)</td>
+      <td>Unquantized BF16/FP16 checkpoint</td>
+      <td><code>--quantization &#123;v100_w4a16_awq,v100_w8a16&#125;</code> (DiT)</td>
+      <td>MiniMax-H3 (validated on V100 in the sglang-V100 fork)</td>
+      <td>W4A16: the TurboMind SM70 library (<code>scripts/v100/setup_v100_turbomind.sh</code>)</td>
+      <td>For V100 (SM70). The DiT loads in FP16 and its linear weights are quantized at load time: W4A16 to round-to-nearest UINT4 (group 128, AWQ layout) on TurboMind's W4A16 GEMM, W8A16 to per-channel INT8 dequantized for cuBLAS. Off SM70, both dequantize to FP16 for each GEMM. See <code>docs/v100/README.md</code>.</td>
+    </tr>
+    <tr>
       <td><code>fp8</code> (offline quantization)</td>
       <td>Quantized transformer component folder, or safetensors with <code>quantization_config</code> metadata</td>
       <td><code>--component-paths.&lt;component&gt;</code> or <code>--component-weights-paths.&lt;component&gt;</code></td>

@@ -82,6 +82,11 @@ from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
 from sglang.srt.layers.quantization.marlin_utils import marlin_uses_sm70_layout
 from sglang.srt.layers.quantization.marlin_utils_fp8 import prepare_fp8_layer_for_marlin
 from sglang.srt.layers.quantization.mxfp8_input import Mxfp8SwizzledInput
+from sglang.srt.layers.quantization.sm70_turbomind_fp8 import (
+    apply_sm70_turbomind_fp8_linear,
+    prepare_sm70_turbomind_fp8_linear,
+    sm70_turbomind_fp8_supported,
+)
 from sglang.srt.layers.quantization.unquant import (
     UnquantizedFusedMoEMethod,
     UnquantizedLinearMethod,
@@ -528,9 +533,14 @@ class Fp8LinearMethod(LinearMethodBase):
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = False
+        self.use_sm70_turbomind = False
         if _is_cuda:
             force_marlin = get_bool_env_var("SGLANG_FORCE_FP8_MARLIN")
-            auto_enable = can_auto_enable_marlin_fp8()
+            if not force_marlin:
+                self.use_sm70_turbomind = sm70_turbomind_fp8_supported(
+                    self.quant_config.weight_block_size
+                )
+            auto_enable = can_auto_enable_marlin_fp8() and not self.use_sm70_turbomind
             self.use_marlin = force_marlin or auto_enable
 
         self.use_mxfp8 = getattr(self.quant_config, "use_mxfp8", False)
@@ -1333,7 +1343,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 _amx_process_weight_after_loading(layer, ["weight"])
                 return
 
-        if self.use_marlin:
+        if self.use_sm70_turbomind:
+            prepare_sm70_turbomind_fp8_linear(layer)
+            # Weight-only: activations are not quantized.
+            del layer.input_scale
+        elif self.use_marlin:
             if self.block_quant:
                 layer.weight_block_size = self.quant_config.weight_block_size
             prepare_fp8_layer_for_marlin(layer, not self.block_quant)
@@ -1346,6 +1360,8 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_sm70_turbomind:
+            return apply_sm70_turbomind_fp8_linear(layer, x, bias)
         if self.use_marlin:
             return torch.ops.sglang.apply_fp8_marlin_linear(
                 input=x,

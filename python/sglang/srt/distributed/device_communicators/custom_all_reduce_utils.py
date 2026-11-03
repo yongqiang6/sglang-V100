@@ -511,12 +511,19 @@ def can_use_custom_all_reduce_with_nvlink(
     # where custom allreduce is not supported
     # this checks hardware and driver support for NVLink
     if world_size > 2 and not full_nvlink:
-        logger.warning(
-            f"{cls_name} is disabled because it's not supported on"
-            " more than two PCIe-only GPUs. To silence this warning, "
-            "specify disable_custom_all_reduce=True explicitly."
+        # A performance heuristic, not a hardware limit: with working P2P (tested
+        # below) one-shot push is correct over PCIe and beats NCCL on small inputs.
+        if not sglang_envs.SGLANG_CUSTOM_AR_ALLOW_PCIE.get():
+            logger.warning(
+                f"{cls_name} is disabled because it's not supported on"
+                " more than two PCIe-only GPUs. To silence this warning, "
+                "specify disable_custom_all_reduce=True explicitly."
+            )
+            return
+        logger.info(
+            f"{cls_name}: no NVLink between the {world_size} GPUs; "
+            "SGLANG_CUSTOM_AR_ALLOW_PCIE=1 enables it over PCIe P2P."
         )
-        return
 
     # test P2P capability, this checks software/cudaruntime support
     # this is expensive to compute at the first time

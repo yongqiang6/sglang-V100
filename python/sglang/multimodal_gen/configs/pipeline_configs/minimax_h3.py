@@ -224,9 +224,41 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
                 f"the strict 4xH200 fl2va deployment; mismatches: {mismatches}"
             )
 
+    @staticmethod
+    def _is_sm70() -> bool:
+        capability = current_platform.get_device_capability()
+        return capability is not None and capability.to_int() == 70
+
+    def _use_fp16_for_bf16_components(self, server_args) -> None:
+        """Volta has no BF16 execution, so BF16 components run in FP16 (the
+        validated V100 profile ran every H3 component in FP16); FP32 is kept."""
+        explicit_bf16 = sorted(
+            name
+            for name, precision in server_args.component_precisions.items()
+            if precision == "bf16"
+        )
+        if explicit_bf16:
+            raise ValueError(
+                f"MiniMax-H3 on V100 cannot run {explicit_bf16} in BF16; use fp16."
+            )
+        for attr in (
+            "dit_precision",
+            "vae_precision",
+            "vae_decode_precision",
+            "audio_vae_precision",
+        ):
+            if getattr(self, attr) == "bf16":
+                setattr(self, attr, "fp16")
+        self.text_encoder_precisions = tuple(
+            "fp16" if precision == "bf16" else precision
+            for precision in self.text_encoder_precisions
+        )
+
     def validate_server_args(self, server_args) -> None:
         # Reject known-inexact VAE modes before any large component download.
         self.vae_config.resolved_parallel_decode_mode()
+        if current_platform.is_cuda() and self._is_sm70():
+            self._use_fp16_for_bf16_components(server_args)
         if server_args.performance_mode == "memory":
             # Batched decoder tiles add activations on top of the resident
             # decoder; memory mode keeps the one-tile recipe at every tier.

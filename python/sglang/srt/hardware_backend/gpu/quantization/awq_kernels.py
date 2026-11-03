@@ -15,6 +15,11 @@ from sglang.srt.layers.quantization.marlin_utils import (
     marlin_permute_scales,
     moe_awq_to_marlin_zero_points,
 )
+from sglang.srt.layers.quantization.sm70_turbomind_awq import (
+    apply_sm70_turbomind_awq_linear,
+    prepare_sm70_turbomind_awq_linear,
+    sm70_turbomind_awq_supported,
+)
 from sglang.srt.layers.quantization.utils import get_scalar_types, replace_parameter
 from sglang.srt.utils import is_hip, is_xpu
 
@@ -73,11 +78,23 @@ else:
 _, scalar_types = get_scalar_types()
 
 
+def _use_sm70_turbomind_awq(quant_config: Optional[QuantizationConfig]) -> bool:
+    return quant_config is not None and sm70_turbomind_awq_supported(
+        quant_config.group_size
+    )
+
+
 class AWQLinearKernel:
     def __init__(self, quant_config: Optional[QuantizationConfig] = None):
         self.quant_config = quant_config
+        self.use_sm70_turbomind = _use_sm70_turbomind_awq(quant_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_sm70_turbomind:
+            prepare_sm70_turbomind_awq_linear(
+                layer, self.quant_config.group_size, self.quant_config.pack_factor
+            )
+            return
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
@@ -88,6 +105,8 @@ class AWQLinearKernel:
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_sm70_turbomind:
+            return apply_sm70_turbomind_awq_linear(layer, x, bias)
         qweight = layer.qweight
         scales = layer.scales
         qzeros = layer.qzeros
@@ -105,8 +124,14 @@ class AWQLinearKernel:
 class AWQMarlinLinearKernel:
     def __init__(self, quant_config: Optional[QuantizationConfig] = None):
         self.quant_config = quant_config
+        self.use_sm70_turbomind = _use_sm70_turbomind_awq(quant_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_sm70_turbomind:
+            prepare_sm70_turbomind_awq_linear(
+                layer, self.quant_config.group_size, self.quant_config.pack_factor
+            )
+            return
         device = layer.qweight.device
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
@@ -148,6 +173,8 @@ class AWQMarlinLinearKernel:
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_sm70_turbomind:
+            return apply_sm70_turbomind_awq_linear(layer, x, bias)
         return apply_awq_marlin_linear(
             input=x,
             weight=layer.qweight,

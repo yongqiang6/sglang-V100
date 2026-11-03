@@ -10,7 +10,7 @@
 #   SGLANG_V100_DEPS_DIR  source cache (default ~/.cache/sglang-v100-sources)
 #   MARLIN_V100_REPO      marlin_v100 checkout (default $SGLANG_V100_DEPS_DIR/marlin-v100)
 #   CUTLASS_DIR           CUTLASS checkout (default: the one bundled with tilelang)
-#   SGLANG_V100_MARLIN_DIR install here instead of the SGLang package; the runtime
+#   SGLANG_V100_EXT_DIR   install here instead of the SGLang package; the runtime
 #                         searches it too
 #   CUDAHOSTCXX           host compiler for nvcc
 #   MAX_JOBS, NVCC_THREADS build parallelism (default: scripts/v100/safe_jobs.sh, 1)
@@ -105,8 +105,8 @@ DENSE_SO="$(ls "$MARLIN_REPO"/vllm/_C.*so 2>/dev/null | head -1 || true)"
 MOE_SO="$(ls "$MARLIN_REPO"/vllm/_moe_C.*so 2>/dev/null | head -1 || true)"
 [[ -f "$DENSE_SO" && -f "$MOE_SO" ]] || die "build did not produce vllm/_C and vllm/_moe_C."
 
-if [[ -n "${SGLANG_V100_MARLIN_DIR:-}" ]]; then
-  DEST="$SGLANG_V100_MARLIN_DIR"
+if [[ -n "${SGLANG_V100_EXT_DIR:-}" ]]; then
+  DEST="$SGLANG_V100_EXT_DIR"
   mkdir -p "$DEST"
 else
   DEST="$("$PYTHON" -c 'import os, sglang.kernels.ops.gemm as g; print(os.path.dirname(g.__file__))')"
