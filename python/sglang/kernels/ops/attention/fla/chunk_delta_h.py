@@ -18,11 +18,17 @@ from sglang.kernels.ops.attention.fla.utils import (
     autotune_cache_kwargs,
     is_nvidia_hopper,
 )
+from sglang.srt.utils.common import get_device_sm
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 CHUNK_SIZE = 64
-GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
-GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
+# Measured on V100 (Qwen3.6-27B GDN, H=12 Hg=4 K=V=128): BV=16 with 8 warps is
+# 12.6x faster than the BV=32 / 4-warp default, which under-occupies 80 SMs.
+_IS_SM70 = get_device_sm() == 70
+GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "16" if _IS_SM70 else "32"))
+GDN_CHUNK_H_NUM_WARPS = int(
+    os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "8" if _IS_SM70 else "4")
+)
 GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host installer for SGLang on NVIDIA V100 (SM70): CUDA 12.6, torch cu126,
+# Host installer for SGLang on NVIDIA V100 (SM70): CUDA 12.8 toolkit, torch cu126,
 # patched FlashInfer and an sm_70-only sglang-kernel build.
 # Run as a child process; do not source it.
 
@@ -17,7 +17,9 @@ die() { printf '\n\033[1;31m[install_v100] ERROR:\033[0m %s\n' "$*" >&2; exit 1;
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEPS_ROOT="${SGLANG_V100_DEPS_DIR:-$HOME/.cache/sglang-v100-sources}"
 CONDA_ENV_NAME="${SGLANG_V100_CONDA_ENV:-sglang-v100}"
-CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.6}"
+# The TileLang GDN kernels need nvcc >= 12.8 (tilelang 0.1.12 headers), and
+# CUDA 13 dropped sm_70.
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
 # The PyPI torch wheel is CUDA 13 and has no sm_70 kernels; cu126 is the only
 # torch 2.14 wheel that still ships them.
 TORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
@@ -30,14 +32,14 @@ FLASHINFER_PATCH="$REPO_ROOT/patches/v100/flashinfer-0.7.2-sm70.patch"
 if [[ ${EUID} -eq 0 ]]; then SUDO=(); else SUDO=(sudo); fi
 
 if [[ ! -x "$CUDA_HOME/bin/nvcc" ]]; then
-  log "Installing CUDA 12.6 toolkit"
+  log "Installing CUDA 12.8 toolkit"
   # shellcheck disable=SC1091
   . /etc/os-release
   wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID//./}/x86_64/cuda-keyring_1.1-1_all.deb" \
     -O /tmp/cuda-keyring.deb
   "${SUDO[@]}" dpkg -i /tmp/cuda-keyring.deb
   "${SUDO[@]}" apt-get update
-  "${SUDO[@]}" apt-get install -y build-essential cmake git ninja-build pkg-config cuda-toolkit-12-6
+  "${SUDO[@]}" apt-get install -y build-essential cmake git ninja-build pkg-config cuda-toolkit-12-8
 fi
 export CUDA_HOME PATH="$CUDA_HOME/bin:$PATH" TORCH_CUDA_ARCH_LIST=7.0
 

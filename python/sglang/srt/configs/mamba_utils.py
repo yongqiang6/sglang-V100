@@ -22,6 +22,7 @@ import torch
 
 from sglang.srt.distributed.utils import divide
 from sglang.srt.environ import envs
+from sglang.srt.utils.common import get_device_sm
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,10 @@ def mamba2_state_dtype(config=None) -> Mamba2StateDType:
     Get mamba2 state dtype from config or environment variable.
 
     Priority (from highest to lowest):
-    1. Environment variable SGLANG_MAMBA_SSM_DTYPE
-    2. Config file (config.mamba_ssm_dtype or config.text_config.mamba_ssm_dtype)
-    3. Default "float32"
+    1. Environment variable SGLANG_MAMBA_SSM_DTYPE (set by --mamba-ssm-dtype)
+    2. "float16" below SM80, where the model itself runs in FP16
+    3. Config file (config.mamba_ssm_dtype or config.text_config.mamba_ssm_dtype)
+    4. Default "float32"
 
     Args:
         config: Optional config object (PretrainedConfig). If provided, will read
@@ -101,6 +103,15 @@ def mamba2_state_dtype(config=None) -> Mamba2StateDType:
             )
         else:
             ssm_dtype = dtype_map[env_ssm_dtype]
+
+    if 0 < get_device_sm() < 80:
+        # Pre-SM80 GPUs run the model in FP16 (no BF16), and FP16 conv states
+        # cannot be written into a BF16 cache. FP16 SSM state is the V100
+        # validated setting; the environment variables still override both.
+        if not envs.SGLANG_MAMBA_CONV_DTYPE.is_set():
+            conv_dtype = torch.float16
+        if env_ssm_dtype is None:
+            ssm_dtype = torch.float16
 
     logger.debug(f"Mamba2 state dtype: conv_dtype={conv_dtype}, ssm_dtype={ssm_dtype}")
 

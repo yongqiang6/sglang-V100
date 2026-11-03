@@ -27,6 +27,7 @@ class LinearAttnKernelBackend(Enum):
     PTX_KDA = "ptx_kda"
     HELION = "helion"
     INTEL_XPU = "intel_xpu"
+    TILELANG = "tilelang"
     CUSTOM = "custom"
 
     @classmethod
@@ -56,6 +57,9 @@ class LinearAttnKernelBackend(Enum):
 
     def is_helion(self):
         return self == LinearAttnKernelBackend.HELION
+
+    def is_tilelang(self):
+        return self == LinearAttnKernelBackend.TILELANG
 
     def is_intel_xpu(self):
         return self == LinearAttnKernelBackend.INTEL_XPU

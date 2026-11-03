@@ -1,9 +1,12 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
 
+from sglang.srt.configs import mamba_utils
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     MambaAttnBackendBase,
 )
@@ -280,6 +283,44 @@ class TestTrackMambaStateDtype(CustomTestCase):
                     self.assertTrue(torch.all(ssm_states[[6, 2, 5]] == 5))
                     expected = DOUBLE_ROUND_PROBE if snapshot else 2.0
                     self.assertTrue(torch.all(ssm_states[4] == expected))
+
+
+class TestPreSm80MambaStateDtype(CustomTestCase):
+    """Below SM80 the model runs in FP16, so the state pool must default to FP16:
+    FP16 conv states cannot be written into the BF16 default conv cache. An
+    explicit dtype (env or --mamba-ssm-dtype) still wins, and SM80+ and non-CUDA
+    hosts keep the BF16 conv / config SSM defaults."""
+
+    @staticmethod
+    def _resolve(sm, **env):
+        config = SimpleNamespace(mamba_ssm_dtype="float32")
+        with (
+            patch.dict(os.environ),
+            patch.object(mamba_utils, "get_device_sm", return_value=sm),
+        ):
+            envs.SGLANG_MAMBA_CONV_DTYPE.clear()
+            envs.SGLANG_MAMBA_SSM_DTYPE.clear()
+            for name, value in env.items():
+                getattr(envs, name).set(value)
+            return mamba_utils.mamba2_state_dtype(config)
+
+    def test_pre_sm80_defaults_to_fp16_unless_explicit(self):
+        dtype = self._resolve(70)
+        self.assertEqual((dtype.conv, dtype.temporal), (torch.float16, torch.float16))
+
+        dtype = self._resolve(
+            70,
+            SGLANG_MAMBA_CONV_DTYPE="bfloat16",
+            SGLANG_MAMBA_SSM_DTYPE="float32",
+        )
+        self.assertEqual((dtype.conv, dtype.temporal), (torch.bfloat16, torch.float32))
+
+        for sm in (0, 80, 90):
+            with self.subTest(sm=sm):
+                dtype = self._resolve(sm)
+                self.assertEqual(
+                    (dtype.conv, dtype.temporal), (torch.bfloat16, torch.float32)
+                )
 
 
 if __name__ == "__main__":

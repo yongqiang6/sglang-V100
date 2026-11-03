@@ -2,34 +2,47 @@
 
 This branch re-ports the V100 work from the `sglang-V100` fork (forked from
 upstream `cdd06011a`, 2026-06-01) onto current upstream SGLang, layer by layer.
-Steps 1-3 (environment, base runtime, attention) are in place; the remaining
-performance layers are not ported yet.
+Steps 1-4 (environment, base runtime, attention, GDN) are in place; the
+remaining performance layers are not ported yet.
 
 | Step | Scope | Status |
 | --- | --- | --- |
-| 1 | Environment: torch cu126, dependency overrides, patched FlashInfer, Docker/host installer, environment check | Done |
+| 1 | Environment: CUDA 12.8 toolkit, torch cu126, dependency overrides, patched FlashInfer, Docker/host installer, environment check | Done |
 | 2 | Base runtime: SM70 floor, `SGL_KERNEL_V100_ONLY` AOT build, FlashInfer SM<80 paths, `moe_sum_reduce` fallback | Done |
 | 3 | Attention: TileLang prefill/decode behind `triton`, `page_size=16` default, Triton SM70 decode tuning, FP8 KV on SM70 | Done |
-| 4 | GDN / linear attention retune, Qwen3.5/3.6 | Not started |
+| 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ, TurboMind FP8 and FP16 MoE, QPN8 | Not started |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Not started |
 | 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | Not started |
 
-## Why CUDA 12.6
+## Why CUDA 12.8 with torch cu126
 
 - Upstream pins `torch==2.14.1`. The PyPI wheel is a CUDA 13.0 build compiled
   for `sm_75 sm_80 sm_86 sm_89 sm_90 sm_100 sm_120` only; CUDA 13 dropped Volta.
 - PyTorch 2.14's `cu126` x86_64 wheel is built for
   `sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90`, so it is the torch build used here
   (`https://download.pytorch.org/whl/cu126`).
-- sglang-kernel and FlashInfer JIT compile with the CUDA 12.6 toolkit.
+- The toolkit (`nvcc`, used by the sglang-kernel build, FlashInfer JIT and
+  TileLang JIT) is CUDA 12.8. Upstream pins `tilelang==0.1.12`, whose
+  `tl_templates/cuda/common.h` has
+  `static_assert(false, "tl::st_bulk_shared requires CUDA >= 12.8")` for older
+  toolkits. nvcc 12.6 trips it in the host pass of `nvcc --shared`, which is
+  how TileLang's `cython` execution backend builds; the SM70 GDN kernels use
+  that backend, so they need nvcc >= 12.8. (The attention kernels use the
+  default `tvm_ffi` backend, which compiles device code only and works with
+  12.6.) CUDA 12.8 still targets `sm_70`; CUDA 13 does not.
+  `check_v100_env.py` requires nvcc 12.8 or 12.9.
+- Torch keeps its CUDA 12.6 runtime wheels. A 12.8 toolkit against a 12.6
+  torch is a minor-version mismatch, which torch's extension builder accepts;
+  use a driver that supports CUDA 12.8 (R570 or newer, still Volta-capable).
+  This mix has not been run on a V100 yet.
 - torch 2.14.1 pins `triton~=3.8.0`; its default `ptxas` is CUDA 12.9 and
   assembles `sm_70` (the bundled `ptxas-blackwell`, CUDA 13.3, does not and is
   only used for Blackwell).
 
 ## Install
 
-Host (conda env `sglang-v100`, installs CUDA 12.6 under `/usr/local/cuda-12.6` if missing):
+Host (conda env `sglang-v100`, installs CUDA 12.8 under `/usr/local/cuda-12.8` if missing):
 
 ```bash
 bash scripts/v100/install_v100.sh
@@ -66,7 +79,7 @@ accepts SM70 in `check_cuda_arch`, re-tunes the HMMA884 (SM70) FMHA-v2 kernel
 specs for V100 shared memory, replaces `cuda::fast_mod_div` with plain division in
 `fastdiv.cuh`, and gives `sampling.cuh` reduce functors for SM<75.
 With v0.7.2's vendored CCCL, `sampling.cu`, `renorm.cu` and `fastdiv.cuh`
-compile for `sm_70` (CUDA 12.6) with or without the last two hunks; only the
+compile for `sm_70` (CUDA 12.6 and 12.8) with or without the last two hunks; only the
 `check_cuda_arch` hunk is strictly required. The others are kept until a V100
 run shows they can be dropped.
 
@@ -127,6 +140,37 @@ name and changes what it builds on SM70:
 Deferred: the fork's saturating E5M2 KV writer (needs the TurboMind extension,
 step 5) and native linear speculative verify in the TileLang backend (step 6).
 
+## Step 4: GDN (Qwen3.5 / Qwen3.6 linear attention)
+
+Upstream reorganized GDN into per-mode kernels behind
+`--linear-attn-{decode,prefill}-backend`, so the fork's hard-wired SM70 paths
+become one more backend plus SM70 defaults:
+
+- `layers/attention/linear/kernels/gdn_tilelang.py`: `TileLangGDNKernel`,
+  selected with `--linear-attn-decode-backend tilelang` and/or
+  `--linear-attn-prefill-backend tilelang` (SM70 only; other GPUs raise).
+  Packed decode runs the persistent TileLang recurrence; decode calls carrying
+  ReplaySSM ring caches, unpacked decode and target verify stay on Triton.
+  Prefill runs the chunked TileLang kernels and, when the batch tracks Mamba
+  prefix-cache states, returns the per-64-token checkpoints in the
+  `[1, num_chunks, HV, V, K]` layout the tracker reads from Triton.
+- Kernels live in `kernels/ops/attention/linear/gdn_tilelang_sm70.py` (packed
+  decode) and `gdn_chunked_tilelang_sm70.py` (chunked prefill, K=V=128, FP16
+  activations, FP16 or FP32 state pool). Their tuning knobs are
+  `SGLANG_V100_GDN_*` in `environ.py`.
+- Triton retune on SM70, kept for the default `triton` GDN backend:
+  `chunk_delta_h.py` defaults to `BV=16`, 8 warps (the fork measured 12.6x over
+  `BV=32`, 4 warps on Qwen3.6-27B TP4); `chunk_o.py` autotunes `BK`/`BV`/warps/
+  stages on SM70 outside graph capture (the fixed H100 launch was 45% of V100
+  prefill time). `SGLANG_GDN_CHUNK_H_*` still override.
+- `configs/mamba_utils.py`: below SM80 the conv and SSM state default to FP16,
+  since the model runs in FP16 and FP16 conv states cannot be written into a
+  BF16 cache. `SGLANG_MAMBA_CONV_DTYPE` / `SGLANG_MAMBA_SSM_DTYPE` still win.
+
+Not ported: the fork's `fused_sigmoid_gating` FP16 verify fix and SM70 `BV=8`
+recurrent tweak (step 6, with speculative decoding) and the Qwen3.8 QSA/HC
+fusions (step 7).
+
 ## Verification status
 
 Done without V100 hardware:
@@ -142,12 +186,20 @@ Done without V100 hardware:
   (normal, grouped) and extend kernels with FP16, E5M2 and E4M3 KV and the
   split-count kernel (Triton 3.8, `GPUTarget("cuda", 70)`); all 13 TileLang
   kernel factories (paged prefill D64/128/256, sliding window, grouped decode,
-  linear verify, FP8 gather, dense D256 variants) with tilelang 0.1.12; and
-  `sm70_longctx_decode.cu` with nvcc 12.6. Unpatched, the grouped decode
-  kernel fails to compile for `sm_70` with E4M3 or E5M2 KV.
+  linear verify, FP8 gather, dense D256 variants) with tilelang 0.1.12 and
+  nvcc 12.8 (and 12.6); and `sm70_longctx_decode.cu` with nvcc 12.6 and 12.8.
+  Unpatched, the grouped decode kernel fails to compile for `sm_70` with E4M3
+  or E5M2 KV.
+- Step 4, compiled for `sm_70` without a GPU (nvcc 12.8, Qwen3.6-27B TP4
+  shapes): the six TileLang GDN kernels (packed decode with FP16 and FP32
+  state, KKT inverse, chunked forward with and without checkpoints, chunked
+  state/output), the Triton `chunk_h` SM70 default and all 24 `chunk_o`
+  autotune configs. With nvcc 12.6 the TileLang GDN kernels fail on the
+  tilelang header described above.
 - Resolution on a simulated SM70 platform is covered by
   `test_model_overrides.py::test_sm70_defaults_to_triton_with_16_token_pages`.
 
 Still needs a V100: `check_v100_env.py` without `--no-gpu`, serving a model,
 CUDA graph capture, the FlashInfer JIT attention paths, and numerical checks of
-the TileLang and FP8 Triton attention against a reference.
+the TileLang and FP8 Triton attention and of the TileLang GDN kernels against
+a reference.

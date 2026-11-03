@@ -18,6 +18,7 @@ from sglang.srt.layers.attention.linear.gdn_backend import (
 from sglang.srt.layers.attention.linear.kernels.gdn_flashinfer import (
     maybe_build_flashinfer_checkpoint_plan,
 )
+from sglang.srt.layers.attention.linear.kernels.gdn_tilelang import TileLangGDNKernel
 from sglang.srt.layers.attention.linear.kernels.gdn_triton import TritonGDNKernel
 from sglang.srt.layers.attention.linear.utils import (
     LinearAttnKernelBackend,
@@ -497,6 +498,44 @@ class TestFlashInferGDNPrefillBackendPolicy(CustomTestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "supports KDA only"):
                     GDNKernelDispatcher(decode_backend, prefill_backend)
+
+    def test_tilelang_backend_is_sm70_only_and_packs_decode(self):
+        """The TileLang GDN kernels are specialized for SM70; elsewhere selecting
+        them must fail rather than launch. On SM70, decode must take the packed
+        path, since the unpacked decode() falls back to Triton."""
+        with patch.object(gdn_backend, "get_device_sm", return_value=90):
+            with self.assertRaisesRegex(ValueError, "SM70"):
+                GDNKernelDispatcher(
+                    LinearAttnKernelBackend.TRITON,
+                    LinearAttnKernelBackend.TILELANG,
+                )
+        with patch.object(gdn_backend, "get_device_sm", return_value=70):
+            dispatcher = GDNKernelDispatcher(
+                LinearAttnKernelBackend.TILELANG,
+                LinearAttnKernelBackend.TILELANG,
+            )
+        self.assertIsInstance(dispatcher.decode_kernel, TileLangGDNKernel)
+        self.assertIsInstance(dispatcher.extend_kernel, TileLangGDNKernel)
+        self.assertTrue(dispatcher.supports_packed_decode)
+
+    def test_tilelang_packed_decode_leaves_replayssm_rings_to_triton(self):
+        """The TileLang recurrence does not read ReplaySSM ring caches; a decode
+        that carries them must run on Triton or the ring state is skipped."""
+        kernel = TileLangGDNKernel()
+        tensor = sentinel.tensor
+        with patch.object(kernel._triton, "packed_decode") as triton_decode:
+            kernel.packed_decode(
+                tensor,
+                tensor,
+                tensor,
+                A_log=tensor,
+                dt_bias=tensor,
+                scale=1.0,
+                ssm_states=tensor,
+                cache_indices=tensor,
+                replayssm_d=tensor,
+            )
+        triton_decode.assert_called_once()
 
 
 if __name__ == "__main__":

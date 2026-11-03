@@ -1276,6 +1276,12 @@ class Envs:
     SGLANG_V100_BFLA_KEEP_RATIO = EnvFloat(1.0)
     SGLANG_V100_BFLA_ALLOW_APPROXIMATE = EnvBool(False)
     SGLANG_V100_BFLA_LOCAL_BLOCKS = EnvInt(8)
+    # TileLang GDN kernels (--linear-attn-*-backend tilelang).
+    SGLANG_V100_GDN_FULL_TILELANG = EnvBool(True)
+    SGLANG_V100_GDN_PACKED_V_DIRECT = EnvBool(True)
+    SGLANG_V100_GDN_VALUE_BLOCK = EnvInt(32)
+    SGLANG_V100_GDN_K_REUSE_MODE = EnvInt(3)
+    SGLANG_V100_GDN_COLUMN_GROUPS_PER_BLOCK = EnvInt(None)
 
     # ===================================================================
     # Quantization

@@ -50,7 +50,11 @@ from sglang.srt.runtime_context import (
     mamba_cache_chunk_size,
 )
 from sglang.srt.utils import is_cpu, is_cuda, is_hip, is_npu, is_xpu
-from sglang.srt.utils.common import is_pin_memory_available, rank0_log
+from sglang.srt.utils.common import (
+    get_device_sm,
+    is_pin_memory_available,
+    rank0_log,
+)
 
 _is_hip = is_hip()
 
@@ -274,6 +278,16 @@ def _validate_gdn_linear_attn_backends(backends: LinearAttnBackends) -> None:
         )
 
 
+def _create_tilelang_gdn_kernel():
+    if get_device_sm() != 70:
+        raise ValueError("The TileLang GDN backend is specialized for SM70 (V100).")
+    from sglang.srt.layers.attention.linear.kernels.gdn_tilelang import (
+        TileLangGDNKernel,
+    )
+
+    return TileLangGDNKernel()
+
+
 class GDNKernelDispatcher:
     """Dispatches GDN kernel calls to the appropriate backend per mode."""
 
@@ -287,6 +301,7 @@ class GDNKernelDispatcher:
         self.tree_verify_kernel = triton_kernel
 
         cutedsl_kernel = None
+        tilelang_kernel = None
         if decode_backend.is_triton():
             self.decode_kernel = triton_kernel
         elif decode_backend.is_intel_xpu():
@@ -318,6 +333,9 @@ class GDNKernelDispatcher:
             raise ValueError(
                 "The Helion linear-attention backend supports KDA only, not GDN."
             )
+        elif decode_backend.is_tilelang():
+            tilelang_kernel = _create_tilelang_gdn_kernel()
+            self.decode_kernel = tilelang_kernel
         else:
             raise ValueError(f"Unsupported GDN decode backend: {decode_backend}")
 
@@ -367,6 +385,10 @@ class GDNKernelDispatcher:
             raise ValueError(
                 "The Helion linear-attention backend supports KDA only, not GDN."
             )
+        elif prefill_backend.is_tilelang():
+            if tilelang_kernel is None:
+                tilelang_kernel = _create_tilelang_gdn_kernel()
+            self.extend_kernel = tilelang_kernel
         else:
             raise ValueError(f"Unsupported GDN prefill backend: {prefill_backend}")
 
@@ -1448,6 +1470,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 output=kwargs.get("linear_attn_output"),
                 layer_id=layer.layer_id,
                 extend_prefix_lens=forward_batch.extend_prefix_lens,
+                # Kernels that always emit per-chunk states ignore this.
+                store_checkpoints=forward_metadata.has_mamba_track_mask,
                 track_state=h_track_buf,
                 track_chunk_idx=(
                     forward_metadata.track_chunk_idx

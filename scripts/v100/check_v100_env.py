@@ -1,8 +1,9 @@
 """Validate a V100 (SM70) SGLang environment.
 
-Static checks (no GPU needed): torch build, CUDA 12 runtime consistency, the
-patched FlashInfer source and the sm_70 sglang-kernel build. GPU checks (skipped
-with --no-gpu) load the kernels on the device and run a few small ops.
+Static checks (no GPU needed): torch build, the nvcc used by the JIT kernels,
+CUDA 12 runtime consistency, the patched FlashInfer source and the sm_70
+sglang-kernel build. GPU checks (skipped with --no-gpu) load the kernels on the
+device and run a few small ops.
 
 Usage:
     python scripts/v100/check_v100_env.py [--no-gpu]
@@ -12,6 +13,8 @@ import argparse
 import glob
 import importlib.metadata as metadata
 import importlib.util
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +60,24 @@ def check_torch() -> None:
     )
     arch_list = torch.cuda.get_arch_list()
     _check("torch ships sm_70 kernels", "sm_70" in arch_list, " ".join(arch_list))
+
+
+def check_nvcc() -> None:
+    cuda_home = os.environ.get("CUDA_HOME")
+    nvcc = str(Path(cuda_home) / "bin" / "nvcc") if cuda_home else shutil.which("nvcc")
+    if not _check(
+        "nvcc found (CUDA_HOME or PATH)", nvcc is not None and Path(nvcc).exists()
+    ):
+        return
+    output = subprocess.run([nvcc, "--version"], capture_output=True, text=True).stdout
+    match = re.search(r"release (\d+)\.(\d+)", output)
+    version = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+    # TileLang's cython backend (SM70 GDN kernels) needs >= 12.8; CUDA 13 drops sm_70.
+    _check(
+        "nvcc is CUDA 12.8 or 12.9",
+        (12, 8) <= version < (13, 0),
+        f"{nvcc}: release {version[0]}.{version[1]}",
+    )
 
 
 def check_cuda_runtime_consistency() -> None:
@@ -178,6 +199,7 @@ def main() -> int:
     args = parser.parse_args()
 
     check_torch()
+    check_nvcc()
     check_cuda_runtime_consistency()
     check_flashinfer()
     check_tilelang()

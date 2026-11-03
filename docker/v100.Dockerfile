@@ -1,12 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
 # SGLang for NVIDIA V100 (Volta, SM70). Mirrors scripts/v100/install_v100.sh:
-# CUDA 12.6, torch cu126 (the PyPI torch wheel has no sm_70 kernels), patched
+# CUDA 12.8 toolkit (the TileLang GDN kernels need >= 12.8; CUDA 13 dropped
+# sm_70), torch cu126 (the PyPI torch wheel has no sm_70 kernels), patched
 # FlashInfer and an sm_70-only sglang-kernel build. Expensive native builds are
 # separate layers so later failures do not invalidate them.
 #
 #   DOCKER_BUILDKIT=1 docker build -f docker/v100.Dockerfile -t sglang-v100 .
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS base
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV CUDA_HOME=/usr/local/cuda \

@@ -1,4 +1,4 @@
-"""Print the pip requirement list for a V100 (SM70, CUDA 12.6) install.
+"""Print the pip requirement list for a V100 (SM70, CUDA 12, torch cu126) install.
 
 Starts from python/pyproject.toml so V100 tracks upstream pins, then removes
 packages that are replaced by V100 source builds or only ship CUDA 13 / SM80+

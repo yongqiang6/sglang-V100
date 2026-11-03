@@ -11,6 +11,7 @@ import triton.language as tl
 from sglang.kernels.ops.attention.fla.index import prepare_chunk_indices
 from sglang.kernels.ops.attention.fla.op import exp, safe_exp
 from sglang.kernels.ops.attention.fla.utils import check_shared_mem, is_nvidia_hopper
+from sglang.srt.utils.common import get_device_sm
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -124,6 +125,22 @@ def chunk_fwd_kernel_o(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
+# The fixed BK=128/BV=64/4-warp launch in chunk_fwd_o is H100-tuned and was 45% of V100
+# prefill GPU time. o is freshly allocated (no in-place state), so autotuning
+# is safe; it is skipped under graph capture, which keeps the fixed launch.
+_IS_SM70 = get_device_sm() == 70
+chunk_fwd_kernel_o_autotuned = triton.autotune(
+    configs=[
+        triton.Config({"BK": bk, "BV": bv}, num_warps=nw, num_stages=ns)
+        for bk in (32, 64, 128)
+        for bv in (32, 64)
+        for nw in (4, 8)
+        for ns in (2, 3)
+    ],
+    key=["H", "K", "V", "BT", "USE_G", "IS_VARLEN"],
+)(chunk_fwd_kernel_o)
+
+
 def chunk_fwd_o(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -148,6 +165,28 @@ def chunk_fwd_o(
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
+
+    if _IS_SM70 and not torch.cuda.is_current_stream_capturing():
+        chunk_fwd_kernel_o_autotuned[grid](
+            q,
+            k,
+            v,
+            h,
+            g,
+            o,
+            cu_seqlens,
+            chunk_indices,
+            scale,
+            T=T,
+            H=H,
+            Hg=Hg,
+            K=K,
+            V=V,
+            BT=BT,
+            USE_G=g is not None,
+            IS_VARLEN=cu_seqlens is not None,
+        )
+        return o
 
     chunk_fwd_kernel_o[grid](
         q,
