@@ -13,7 +13,10 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from sglang.srt.layers.quantization.marlin_utils import check_marlin_supported
+from sglang.srt.layers.quantization.marlin_utils import (
+    check_marlin_supported,
+    marlin_uses_sm70_layout,
+)
 from sglang.srt.layers.quantization.utils import (
     get_linear_quant_method,
     get_scalar_types,
@@ -384,7 +387,8 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        # SM70 runs Marlin through the external marlin_v100 kernels.
+        return 70 if marlin_uses_sm70_layout() else 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -471,6 +475,10 @@ class GPTQMarlinConfig(QuantizationConfig):
             return False
 
         if (num_bits, sym) not in cls.TYPE_MAP:
+            return False
+
+        # marlin_v100 (SM70) rejects act-order g_idx; keep those on GPTQ kernels.
+        if desc_act and marlin_uses_sm70_layout():
             return False
 
         try:

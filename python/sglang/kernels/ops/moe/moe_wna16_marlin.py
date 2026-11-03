@@ -7,6 +7,7 @@ import torch
 from sglang.kernels.arch import current_arch
 from sglang.kernels.jit.utils import cache_once, load_jit, make_cpp_args
 from sglang.kernels.kernel_api_logging import debug_kernel_api
+from sglang.kernels.ops.gemm import sm70_marlin_v100
 
 if TYPE_CHECKING:
     from sgl_kernel.scalar_type import ScalarType
@@ -108,6 +109,37 @@ def moe_wna16_marlin_gemm(
     # Early return for zero-size M
     if size_m == 0:
         return c
+
+    if sm70_marlin_v100.is_active():
+        # marlin_v100 leaves rows of negative-expert blocks untouched.
+        if zero_inactive_output and c_or_none is not None:
+            c.zero_()
+        return sm70_marlin_v100.moe_wna16_marlin_gemm(
+            a,
+            c,
+            b_q_weight,
+            b_bias_or_none,
+            b_scales,
+            global_scale_or_none,
+            b_zeros_or_none,
+            g_idx_or_none,
+            perm_or_none,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            topk_weights,
+            moe_block_size,
+            top_k,
+            mul_topk_weights,
+            b_q_type.id,
+            size_m,
+            size_n,
+            size_k,
+            is_k_full,
+            use_fp32_reduce,
+            is_zp_float,
+        )
 
     # Determine activation ordering
     has_act_order = (

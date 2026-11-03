@@ -135,6 +135,7 @@ class AWQMarlinLinearKernel:
             size_k=layer.num_groups,
             size_n=layer.output_size_per_partition,
             num_bits=self.quant_config.quant_type.size_bits,
+            scales=marlin_scales,
         )
         replace_parameter(layer, "qzeros", marlin_zp)
 
@@ -219,6 +220,7 @@ class AWQMoEKernel:
             size_k=layer.w13_qzeros.shape[1],
             size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            scales=marlin_w13_scales,
         )
         replace_parameter(layer, "w13_qzeros", marlin_w13_zp)
 
@@ -227,6 +229,7 @@ class AWQMoEKernel:
             size_k=layer.w2_qzeros.shape[1],
             size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            scales=marlin_w2_scales,
         )
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 

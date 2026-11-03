@@ -11,7 +11,7 @@ remaining performance layers are not ported yet.
 | 2 | Base runtime: SM70 floor, `SGL_KERNEL_V100_ONLY` AOT build, FlashInfer SM<80 paths, `moe_sum_reduce` fallback | Done |
 | 3 | Attention: TileLang prefill/decode behind `triton`, `page_size=16` default, Triton SM70 decode tuning, FP8 KV on SM70 | Done |
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
-| 5 | Quantization: Marlin-V100 GPTQ/AWQ, TurboMind FP8 and FP16 MoE, QPN8 | Not started |
+| 5 | Quantization: Marlin-V100 GPTQ/AWQ (done); TurboMind FP8 and FP16 MoE, QPN8 | In progress |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Not started |
 | 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | Not started |
 
@@ -171,6 +171,42 @@ Not ported: the fork's `fused_sigmoid_gating` FP16 verify fix and SM70 `BV=8`
 recurrent tweak (step 6, with speculative decoding) and the Qwen3.8 QSA/HC
 fusions (step 7).
 
+## Step 5a: Marlin GPTQ / AWQ on SM70 (marlin_v100)
+
+SGLang's JIT Marlin kernels (dense GEMM, MoE GEMM, GPTQ/AWQ repack) compile to
+empty bodies below SM80: on V100 they launch and write nothing. The fork's fix
+is kept: the external [marlin_v100](https://github.com/zhinianqin/marlin_v100)
+library (vLLM op schemas, real SM70 kernels), pinned and patched by
+`scripts/v100/setup_v100_marlin.sh` (called from `install_v100.sh` and the
+Docker image; `SGLANG_V100_MARLIN_DIR` adds a search directory). The patches:
+C++20 for torch 2.14's headers (marlin_v100 targets torch 2.10), and the fork's
+measured MoE CTA/split-K selections. The fork's bf16-compat patch is dropped; it
+is only needed below CUDA 12.8.
+
+- `kernels/ops/gemm/sm70_marlin_v100.py` loads `_sm70_marlin_v100_{dense,moe}.abi3.so`
+  on SM70; `gptq_marlin_gemm`, `moe_wna16_marlin_gemm`, `gptq_marlin_repack` and
+  `awq_marlin_repack` dispatch to it when both are loaded. The fork only routed
+  MoE and FP8 dense layers; dense GPTQ/AWQ layers would still have hit the stub.
+- marlin_v100 reads metadata in its own layout: scales in logical `[groups, N]`
+  order and zero points as fp16 `zero_point * scale`. `marlin_utils`
+  (`marlin_permute_scales`, `marlin_zero_points`, `awq_to_marlin_zero_points`,
+  `moe_awq_to_marlin_zero_points`) emit that layout on SM70, and `is_zp_float`
+  follows the zero-point dtype.
+- It skips MoE blocks with a negative expert id without writing their rows, so
+  on SM70 a caller-provided output is zeroed when `zero_inactive_output` is set.
+- `gptq_marlin` / `awq_marlin` report SM70 as supported when the library is
+  loaded, so `gptq`/`awq` checkpoints are promoted as on SM80+, except act-order
+  (`desc_act`) GPTQ, which marlin_v100 rejects. FP4 Marlin (NVFP4/MXFP4) raises
+  on SM70 until its scale encoding is ported (step 7).
+- `fused_marlin_moe` uses the Triton `moe_sum_reduce` below SM80.
+- Kernel limits on SM70: FP16 activations/outputs only, `size_n % 64 == 0`,
+  `size_k % 32 == 0`, groups -1/32/64/128 (FP8: -1/128).
+
+Triton fused MoE: the fork's tuned `E=256,N=128,device_name=Tesla_V100-SXM2-32GB`
+config (FP16 Qwen3.6 MoE) is kept under `triton_3_5_1/`, where it was measured;
+upstream's lookup falls back to it on triton 3.8. The fork's `SGLANG_MOE_BLOCK_*`
+sweep variables are not ported; tune with `benchmark/kernels/fused_moe_triton/`.
+
 ## Verification status
 
 Done without V100 hardware:
@@ -198,6 +234,13 @@ Done without V100 hardware:
   tilelang header described above.
 - Resolution on a simulated SM70 platform is covered by
   `test_model_overrides.py::test_sm70_defaults_to_triton_with_16_token_pages`.
+
+- Step 5a: the three marlin_v100 patches apply at the pinned revision. Without
+  `marlin-v100-torch-cxx20.patch` its C++17 build fails on torch 2.14's headers;
+  with it, `setup_v100_marlin.sh` compiles marlin_v100 for `sm_70` with nvcc 12.8
+  (full build and op registration not yet confirmed here). The SM70 metadata
+  and dispatch contracts are covered by
+  `test/registered/unit/layers/quantization/test_sm70_marlin_v100.py`.
 
 Still needs a V100: `check_v100_env.py` without `--no-gpu`, serving a model,
 CUDA graph capture, the FlashInfer JIT attention paths, and numerical checks of

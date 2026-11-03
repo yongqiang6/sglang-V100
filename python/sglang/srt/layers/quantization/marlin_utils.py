@@ -62,6 +62,25 @@ class MarlinLinearLayerConfig:
     has_g_idx: bool
 
 
+def marlin_uses_sm70_layout() -> bool:
+    """True when Marlin runs on marlin_v100 (SM70). Its kernels read scales in
+    logical [groups, N] order and zero points as float ``zero_point * scale``."""
+    if not _is_cuda:
+        return False
+    from sglang.kernels.ops.gemm import sm70_marlin_v100
+
+    return sm70_marlin_v100.is_active()
+
+
+def sm70_marlin_float_zero_points(
+    zp: torch.Tensor, scales: torch.Tensor
+) -> torch.Tensor:
+    """Unpacked integer zero points [groups, N] -> marlin_v100's float metadata."""
+    size_n = scales.shape[-1]
+    zp = zp.reshape(-1, size_n).to(torch.float32)
+    return (zp * scales.reshape(-1, size_n).to(torch.float32)).to(scales.dtype)
+
+
 # For binary size and compile time, we don't support the same types for with and
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
@@ -75,7 +94,9 @@ def query_marlin_supported_quant_types(
         capability = major * 10 + minor if major is not None else None
         device_capability = -1 if capability is None else capability
 
-    if device_capability < 80:
+    if device_capability < 80 and not (
+        device_capability == 70 and marlin_uses_sm70_layout()
+    ):
         return []
 
     # - has_zp is True: return quant_types that has zero points
@@ -97,7 +118,10 @@ def query_marlin_supported_quant_types(
         # GPTQ style, unsigned + symmetric bias
         res = [scalar_types.uint4b8, scalar_types.uint8b128]
         if include_fp_type:
-            res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
+            res += [scalar_types.float8_e4m3fn]
+            # SM70 FP4 Marlin needs its own scale encoding, not ported yet.
+            if device_capability >= 80:
+                res += [scalar_types.float4_e2m1f]
         return res
 
 
@@ -311,6 +335,8 @@ def get_scale_perms():
 def marlin_permute_scales(
     s: torch.Tensor, size_k: int, size_n: int, group_size: int
 ) -> torch.Tensor:
+    if marlin_uses_sm70_layout():
+        return s.reshape((-1, size_n)).contiguous()
     scale_perm, scale_perm_single = get_scale_perms()
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
@@ -347,8 +373,17 @@ def marlin_moe_permute_scales(
 
 
 def marlin_zero_points(
-    zp: torch.Tensor, size_k: int, size_n: int, num_bits: int
+    zp: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    scales: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """``scales`` are the logical [size_k, size_n] scales; SM70 needs them."""
+    if marlin_uses_sm70_layout():
+        if scales is None:
+            raise ValueError("SM70 Marlin zero points need the logical scales.")
+        return sm70_marlin_float_zero_points(zp, scales)
     # Permute zero-points in a similar way to scales, but do not use the
     # "single" permutation, since zero-points are applied on every MMA
     scale_perm, _ = get_scale_perms()
@@ -370,7 +405,11 @@ def marlin_zero_points(
 
 
 def awq_to_marlin_zero_points(
-    q_zp_packed: torch.Tensor, size_k: int, size_n: int, num_bits: int
+    q_zp_packed: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    scales: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # AWQ zero-points are quantized and packed on the column dim.
     # In addition, the values are permuted based on dequantizer.
@@ -389,13 +428,29 @@ def awq_to_marlin_zero_points(
     q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
     q_zp = q_zp.reshape((-1, size_n)).contiguous()
 
-    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
+    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits, scales=scales)
     return marlin_zp
 
 
 def moe_awq_to_marlin_zero_points(
-    q_zp_packed: torch.Tensor, size_k: int, size_n: int, num_bits: int
+    q_zp_packed: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    scales: Optional[torch.Tensor] = None,
 ):
+    """``scales`` are the logical [E, size_k, size_n] scales; SM70 needs them."""
+    if marlin_uses_sm70_layout():
+        if scales is None:
+            raise ValueError("SM70 Marlin zero points need the logical scales.")
+        return torch.stack(
+            [
+                awq_to_marlin_zero_points(
+                    q_zp_packed[e], size_k, size_n, num_bits, scales=scales[e]
+                )
+                for e in range(q_zp_packed.shape[0])
+            ]
+        )
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
@@ -459,6 +514,10 @@ def should_use_atomic_add_reduce(
     return True
 
 
+def _is_zp_float(weight_zp: Optional[torch.Tensor]) -> bool:
+    return weight_zp is not None and weight_zp.is_floating_point()
+
+
 def apply_gptq_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -504,7 +563,7 @@ def apply_gptq_marlin_linear(
             is_k_full=is_k_full,
             use_atomic_add=use_atomic_add,
             use_fp32_reduce=use_fp32_reduce,
-            is_zp_float=False,
+            is_zp_float=_is_zp_float(weight_zp),
         )
     else:
         output = unified_apply_gptq_marlin_gemm_with_wtype(
@@ -521,7 +580,7 @@ def apply_gptq_marlin_linear(
             is_k_full=is_k_full,
             use_atomic_add=use_atomic_add,
             use_fp32_reduce=use_fp32_reduce,
-            is_zp_float=False,
+            is_zp_float=_is_zp_float(weight_zp),
         )
 
     if bias is not None:
@@ -573,7 +632,7 @@ def apply_awq_marlin_linear(
             size_k=input_size_per_partition,
             use_atomic_add=use_atomic_add,
             use_fp32_reduce=use_fp32_reduce,
-            is_zp_float=False,
+            is_zp_float=_is_zp_float(weight_zp),
         )
     else:
         output = unified_apply_gptq_marlin_gemm(
@@ -588,7 +647,7 @@ def apply_awq_marlin_linear(
             input_size_per_partition=input_size_per_partition,
             use_atomic_add=use_atomic_add,
             use_fp32_reduce=use_fp32_reduce,
-            is_zp_float=False,
+            is_zp_float=_is_zp_float(weight_zp),
         )
 
     if bias is not None:

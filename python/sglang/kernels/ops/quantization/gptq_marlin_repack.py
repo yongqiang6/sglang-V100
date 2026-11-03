@@ -6,6 +6,7 @@ import torch
 
 from sglang.kernels.jit.utils import cache_once, load_jit
 from sglang.kernels.kernel_api_logging import debug_kernel_api
+from sglang.kernels.ops.gemm import sm70_marlin_v100
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -31,6 +32,11 @@ def gptq_marlin_repack(
     size_n: int,
     num_bits: int,
 ) -> torch.Tensor:
+    if sm70_marlin_v100.is_active():
+        return sm70_marlin_v100.gptq_marlin_repack(
+            b_q_weight, perm, size_k, size_n, num_bits
+        )
+
     pack_factor = 32 // num_bits
 
     # Allocate output tensor

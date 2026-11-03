@@ -1282,6 +1282,8 @@ class Envs:
     SGLANG_V100_GDN_VALUE_BLOCK = EnvInt(32)
     SGLANG_V100_GDN_K_REUSE_MODE = EnvInt(3)
     SGLANG_V100_GDN_COLUMN_GROUPS_PER_BLOCK = EnvInt(None)
+    # Extra directory searched for the marlin_v100 libraries (setup_v100_marlin.sh).
+    SGLANG_V100_MARLIN_DIR = EnvStr(None)
 
     # ===================================================================
     # Quantization

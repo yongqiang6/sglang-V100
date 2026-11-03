@@ -10,6 +10,7 @@ from sglang.srt.layers.quantization.marlin_utils import (
     marlin_make_workspace,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_uses_sm70_layout,
     should_use_atomic_add_reduce,
 )
 from sglang.srt.layers.quantization.utils import get_scalar_types
@@ -139,7 +140,14 @@ def apply_fp4_marlin_linear(
     return output.reshape(out_shape)
 
 
+def _reject_sm70_fp4_marlin() -> None:
+    # marlin_v100 reads FP4 scales in its own S0E5M3 encoding, not ported yet.
+    if marlin_uses_sm70_layout():
+        raise NotImplementedError("FP4 Marlin is not supported on SM70 (V100) yet.")
+
+
 def prepare_nvfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
+    _reject_sm70_fp4_marlin()
     if getattr(layer, "quant_config", None) is not None:
         group_size = layer.quant_config.group_size
         if group_size != 16:
@@ -214,6 +222,7 @@ def prepare_nvfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
 
 def prepare_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
+    _reject_sm70_fp4_marlin()
     group_size = 32
     if getattr(layer, "quant_config", None) is not None:
         configured = layer.quant_config.group_size
@@ -417,6 +426,7 @@ def _permute_moe_fp4_scales_for_marlin(
 
 
 def prepare_moe_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
+    _reject_sm70_fp4_marlin()
     group_size = 32
     w13 = layer.w13_weight.data
     w2 = layer.w2_weight.data
@@ -551,6 +561,7 @@ def prepare_moe_nvfp4_layer_for_marlin(
     # compressed-tensors carries the group size on the per-layer scheme rather
     # than on layer.quant_config (which the MoE weight loader owns), so callers
     # outside ModelOpt pass it in.
+    _reject_sm70_fp4_marlin()
     if group_size is None:
         group_size = layer.quant_config.group_size
     if group_size != 16:

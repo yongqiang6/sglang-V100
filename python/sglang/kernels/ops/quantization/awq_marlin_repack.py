@@ -6,6 +6,7 @@ import torch
 
 from sglang.kernels.jit.utils import cache_once, load_jit
 from sglang.kernels.kernel_api_logging import debug_kernel_api
+from sglang.kernels.ops.gemm import sm70_marlin_v100
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -27,6 +28,9 @@ def awq_marlin_repack(
     size_n: int,
     num_bits: int,
 ) -> torch.Tensor:
+    if sm70_marlin_v100.is_active():
+        return sm70_marlin_v100.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
     tile_size = 16
     pack_factor = 32 // num_bits
     out = torch.empty(

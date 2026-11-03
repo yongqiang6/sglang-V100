@@ -9,12 +9,19 @@ from sglang.kernels.ops.activation.minimax_m3_swiglu import swiglu_oai_split
 from sglang.srt.layers import zero_copy_context
 from sglang.srt.runtime_context import get_platform
 from sglang.srt.utils import is_cuda
+from sglang.srt.utils.common import get_device_sm
 from sglang.srt.utils.custom_op import register_custom_op
 
 _is_cuda = is_cuda()
 
 if _is_cuda:
-    from sgl_kernel import moe_sum_reduce
+    if get_device_sm() >= 80:
+        from sgl_kernel import moe_sum_reduce
+    else:
+        # The AOT moe_sum_reduce uses BF16 intrinsics and is not built for SM70.
+        from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
+            moe_sum_reduce_triton as moe_sum_reduce,
+        )
 
     from sglang.kernels.ops.activation.activation import (
         silu_and_mul,
@@ -340,7 +347,7 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
-        is_zp_float=False,
+        is_zp_float=w1_zeros is not None and w1_zeros.is_floating_point(),
     )
 
     if activation == "silu" and is_gated and gemm1_alpha is not None:
@@ -405,7 +412,7 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
-        is_zp_float=False,
+        is_zp_float=w2_zeros is not None and w2_zeros.is_floating_point(),
     ).view(-1, topk, K)
 
     if no_combine:

@@ -390,6 +390,7 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
                 size_k=layer.w13_weight_zero_point.shape[1],
                 size_n=layer.w13_weight_zero_point.shape[2] * self.packed_factor,
                 num_bits=self.num_bits,
+                scales=marlin_w13_scales,
             )
             replace_tensor("w13_weight_zero_point", marlin_w13_zp)
 
@@ -398,6 +399,7 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
                 size_k=layer.w2_weight_zero_point.shape[1],
                 size_n=layer.w2_weight_zero_point.shape[2] * self.packed_factor,
                 num_bits=self.num_bits,
+                scales=marlin_w2_scales,
             )
             replace_tensor("w2_weight_zero_point", marlin_w2_zp)
 

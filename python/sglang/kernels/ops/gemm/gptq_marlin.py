@@ -7,6 +7,7 @@ import torch
 from sglang.kernels.arch import current_arch
 from sglang.kernels.jit.utils import cache_once, load_jit, make_cpp_args
 from sglang.kernels.kernel_api_logging import debug_kernel_api
+from sglang.kernels.ops.gemm import sm70_marlin_v100
 
 if TYPE_CHECKING:
     from sgl_kernel.scalar_type import ScalarType
@@ -62,6 +63,26 @@ def gptq_marlin_gemm(
     # Early return for zero-size M
     if size_m == 0:
         return c
+
+    if sm70_marlin_v100.is_active():
+        return sm70_marlin_v100.marlin_gemm(
+            a,
+            c,
+            b_q_weight,
+            b_scales,
+            global_scale,
+            b_zeros,
+            g_idx,
+            perm,
+            workspace,
+            b_q_type.id,
+            size_m,
+            size_n,
+            size_k,
+            is_k_full,
+            use_fp32_reduce,
+            is_zp_float,
+        )
 
     # Determine activation ordering
     has_act_order = (

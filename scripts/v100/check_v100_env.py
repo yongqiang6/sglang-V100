@@ -1,9 +1,9 @@
 """Validate a V100 (SM70) SGLang environment.
 
 Static checks (no GPU needed): torch build, the nvcc used by the JIT kernels,
-CUDA 12 runtime consistency, the patched FlashInfer source and the sm_70
-sglang-kernel build. GPU checks (skipped with --no-gpu) load the kernels on the
-device and run a few small ops.
+CUDA 12 runtime consistency, the patched FlashInfer source, the sm_70
+sglang-kernel build and the marlin_v100 libraries. GPU checks (skipped with
+--no-gpu) load the kernels on the device and run a few small ops.
 
 Usage:
     python scripts/v100/check_v100_env.py [--no-gpu]
@@ -149,6 +149,33 @@ def check_sgl_kernel_build() -> None:
     _check("sgl_kernel contains sm_70 cubins", ".sm_70." in listing)
 
 
+def check_marlin_v100() -> None:
+    # Names and search order match sglang/kernels/ops/gemm/sm70_marlin_v100.py.
+    spec = importlib.util.find_spec("sglang.kernels.ops.gemm")
+    dirs = [os.environ.get("SGLANG_V100_MARLIN_DIR")]
+    dirs.append(str(Path(spec.origin).parent) if spec and spec.origin else None)
+    libraries = {}
+    for name in ("_sm70_marlin_v100_dense.abi3.so", "_sm70_marlin_v100_moe.abi3.so"):
+        found = [Path(d) / name for d in dirs if d and (Path(d) / name).exists()]
+        libraries[name] = found[0] if found else None
+    missing = [name for name, path in libraries.items() if path is None]
+    if not _check(
+        "marlin_v100 libraries installed (GPTQ/AWQ/FP8 Marlin on SM70)",
+        not missing,
+        f"missing {missing} in {[d for d in dirs if d]}" if missing else "",
+    ):
+        return
+    import torch
+
+    for path in libraries.values():
+        torch.ops.load_library(str(path))
+    _check(
+        "marlin_v100 registers its Marlin ops",
+        hasattr(torch.ops._C, "marlin_gemm")
+        and hasattr(torch.ops._moe_C, "moe_wna16_marlin_gemm"),
+    )
+
+
 def check_gpu() -> None:
     import torch
 
@@ -204,6 +231,7 @@ def main() -> int:
     check_flashinfer()
     check_tilelang()
     check_sgl_kernel_build()
+    check_marlin_v100()
     if not args.no_gpu:
         check_gpu()
 

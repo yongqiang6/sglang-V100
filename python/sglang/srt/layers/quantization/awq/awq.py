@@ -19,6 +19,7 @@ from sglang.srt.layers.quantization.marlin_utils import (
     check_marlin_supported,
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
+    marlin_uses_sm70_layout,
     verify_marlin_supported,
 )
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
@@ -305,7 +306,8 @@ class AWQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        # SM70 runs Marlin through the external marlin_v100 kernels.
+        return 70 if marlin_uses_sm70_layout() else 80
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:

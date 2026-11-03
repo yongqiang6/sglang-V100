@@ -95,6 +95,10 @@ if [[ ! -d "$FLASHINFER_DIR/.git" ]]; then
   git clone "$FLASHINFER_REPO" "$FLASHINFER_DIR"
 fi
 if [[ "$(cat "$FLASHINFER_DIR/.sglang-v100-patch" 2>/dev/null)" != "$PATCH_STAMP-$FLASHINFER_REV" ]]; then
+  if [[ -f "$FLASHINFER_DIR/.sglang-v100-patch" ]]; then
+    # Only this script's patch is applied; restore it before re-patching.
+    git -C "$FLASHINFER_DIR" checkout -- .
+  fi
   git -C "$FLASHINFER_DIR" diff --quiet || die "$FLASHINFER_DIR has local changes; move it aside and rerun."
   git -C "$FLASHINFER_DIR" fetch origin "$FLASHINFER_REV"
   git -C "$FLASHINFER_DIR" checkout --detach "$FLASHINFER_REV"
@@ -113,6 +117,9 @@ python -m pip uninstall -y sglang-kernel || true
 find "$AOT_DIR/python/sgl_kernel" -type f -name 'common_ops*.so' -delete
 CMAKE_ARGS="-DSGL_KERNEL_V100_ONLY=ON -DSGL_KERNEL_COMPILE_THREADS=$NVCC_THREADS" \
   python -m pip install --no-deps --no-build-isolation "$AOT_DIR"
+
+log "Building marlin_v100 (SM70 GPTQ/AWQ/FP8 Marlin kernels)"
+SGLANG_V100_DEPS_DIR="$DEPS_ROOT" bash "$REPO_ROOT/scripts/v100/setup_v100_marlin.sh"
 
 log "Keeping only torch's CUDA 12 NCCL"
 python -m pip uninstall -y nvidia-nccl-cu13 || true

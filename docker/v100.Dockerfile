@@ -11,6 +11,7 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV CUDA_HOME=/usr/local/cuda \
+    SGLANG_V100_MARLIN_DIR=/opt/marlin-v100 \
     TORCH_CUDA_ARCH_LIST=7.0 \
     NVCC_THREADS=1 \
     VIRTUAL_ENV=/opt/venv \
@@ -54,6 +55,14 @@ RUN git clone https://github.com/flashinfer-ai/flashinfer.git /opt/deps/flashinf
     && BUILD_NVEP=0 FLASHINFER_BUILD_NO_PIP=1 \
        python -m pip install --no-deps --no-build-isolation -e /opt/deps/flashinfer-sm70
 
+# marlin_v100: SM70 Marlin GEMM/repack kernels (SGLang's own are empty below SM80).
+COPY patches/v100/marlin-v100-torch-cxx20.patch \
+     patches/v100/marlin-v100-qwen-sm70-tuning.patch \
+     patches/v100/marlin-v100-qwen38-nvfp4-tuning.patch \
+     /opt/sglang/patches/v100/
+RUN SGLANG_V100_DEPS_DIR=/opt/deps bash /opt/sglang/scripts/v100/setup_v100_marlin.sh \
+    && rm -rf /opt/deps/marlin-v100/build
+
 # Only the AOT kernel sources invalidate this layer.
 COPY python/sglang/kernels/aot /opt/sglang/python/sglang/kernels/aot
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -83,6 +92,7 @@ ENV HF_HOME=/root/.cache/huggingface \
     TORCHINDUCTOR_CACHE_DIR=/root/sglang-v100-jit/torchinductor
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/marlin-v100 /opt/marlin-v100
 COPY --from=builder /opt/deps/flashinfer-sm70 /opt/deps/flashinfer-sm70
 COPY --from=builder /opt/sglang /opt/sglang
 COPY docker/v100-entrypoint.sh /usr/local/bin/v100-entrypoint

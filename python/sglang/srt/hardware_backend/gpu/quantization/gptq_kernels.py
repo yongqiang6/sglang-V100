@@ -17,6 +17,7 @@ from sglang.srt.layers.quantization.marlin_utils import (
     marlin_moe_permute_scales,
     marlin_permute_scales,
     marlin_sort_g_idx,
+    marlin_uses_sm70_layout,
     marlin_zero_points,
 )
 from sglang.srt.layers.quantization.utils import (
@@ -155,6 +156,13 @@ class GPTQMarlinLinearKernel:
             grouped_k = (
                 c.partition_weight_shape[0] // c.group_size if c.group_size != -1 else 1
             )
+            zp_scales = None
+            if marlin_uses_sm70_layout():
+                scale_param = getattr(layer, self.w_s_name)
+                permute_param_layout_(scale_param, input_dim=0, output_dim=1)
+                zp_scales = scale_param.data.reshape(
+                    grouped_k, c.partition_weight_shape[1]
+                )
             _transform_param(
                 layer,
                 self.w_zp_name,
@@ -168,6 +176,7 @@ class GPTQMarlinLinearKernel:
                     size_k=grouped_k,
                     size_n=c.partition_weight_shape[1],
                     num_bits=c.weight_type.size_bits,
+                    scales=zp_scales,
                 ),
             )
         else:
