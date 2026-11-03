@@ -231,6 +231,15 @@ and WAR-barrier refactors) that current upstream already has. Ported deltas:
 - SM70 verify launch for Qwen3.6-27B TP4 MTP (`N=1, H=4, HV=12, K=V=128`,
   2 or 4 draft tokens): `BV=8` (192 CTAs instead of 48), bit-identical to BV=32.
 
+Not ported, by design:
+
+- The fork's lazy `TRTLLMMLABackend` import in `eagle_worker_v2`: it worked
+  around a FlashInfer older than the MLA backend expected. The port builds the
+  FlashInfer version upstream pins, so the module-level import is unchanged.
+- The fork's DFlash sampling changes (penalties, min-p, seeded coins): they are
+  model-agnostic and written against the fork's DFlash, which upstream's
+  DFlash v2 has since replaced; they are not V100 adaptations.
+
 ## Verification status
 
 Done without V100 hardware:

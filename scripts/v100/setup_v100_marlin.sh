@@ -93,7 +93,8 @@ if [[ -n "$CMAKE_CACHE" ]] && ! grep -Fq "$ACTIVE_PREFIX" "$CMAKE_CACHE"; then
 fi
 
 export TORCH_CUDA_ARCH_LIST=7.0
-export MAX_JOBS="${MAX_JOBS:-$(bash "$REPO_ROOT/scripts/v100/safe_jobs.sh")}"
+# One marlin_v100 compiler process passed 7 GiB here (sm_70, nvcc 12.8).
+export MAX_JOBS="${MAX_JOBS:-$(bash "$REPO_ROOT/scripts/v100/safe_jobs.sh" 10)}"
 export NVCC_THREADS="${NVCC_THREADS:-1}"
 # build.sh runs `cmake --build`, which ignores MAX_JOBS.
 export CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS"

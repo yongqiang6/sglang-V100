@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
+# Usage: safe_jobs.sh [GiB per compiler process, default 6]
 set -euo pipefail
+
+job_gib="${1:-6}"
 
 if [[ -n "${MAX_JOBS:-}" ]]; then
   printf '%s\n' "$MAX_JOBS"
@@ -21,9 +24,9 @@ if [[ -r /sys/fs/cgroup/memory.max ]]; then
   fi
 fi
 
-# Keep 4 GiB for the OS/linker and budget 6 GiB per compiler process; measured:
-# cicc peaks at ~5.5 GiB on csrc/gemm/fp8_gemm_kernel.cu (sm_70, CUDA 12.6).
-memory_jobs=$(( (available_kib - 4 * 1024 * 1024) / (6 * 1024 * 1024) ))
+# Keep 4 GiB for the OS/linker. The default 6 GiB per compiler process is
+# measured: cicc peaks at ~5.5 GiB on csrc/gemm/fp8_gemm_kernel.cu (sm_70).
+memory_jobs=$(( (available_kib - 4 * 1024 * 1024) / (job_gib * 1024 * 1024) ))
 (( memory_jobs < 1 )) && memory_jobs=1
 (( memory_jobs < cpu_jobs )) && cpu_jobs="$memory_jobs"
 printf '%s\n' "$cpu_jobs"
