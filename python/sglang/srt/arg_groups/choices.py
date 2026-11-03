@@ -86,6 +86,8 @@ ATTENTION_BACKEND_CHOICES = [
     "trtllm_mla",
     "cutedsl_mla",
     "tokenspeed_mla",  # Deprecated alias for "cutedsl_mla"
+    "tilelang_fa_v100",  # Deprecated alias for "triton" (TileLang on SM70)
+    "flash_attn_v100",  # Deprecated alias for "triton" (TileLang on SM70)
     "trtllm_mha",
     "hpc_ops",  # HPC-Ops (https://github.com/Tencent/hpc-ops), Hopper (SM90) only, requires --page-size 64
     "minicpm_flashattn",

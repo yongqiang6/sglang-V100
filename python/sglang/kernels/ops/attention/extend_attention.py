@@ -23,7 +23,11 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.kernels.ops.attention.decode_attention import _extract_kv_strides
+from sglang.kernels.ops.attention.decode_attention import (
+    _extract_kv_strides,
+    _sm70_fp8_kind,
+)
+from sglang.kernels.ops.attention.fp8_sm70 import fp8_sm70_to_fp32
 from sglang.kernels.ops.attention.score_mod import unpack_aux_tensors
 from sglang.srt.environ import envs
 from sglang.srt.utils import is_cuda, is_gfx95_supported, is_gfx1250_supported, is_hip
@@ -439,6 +443,8 @@ def _fwd_kernel(
     PAGE_SIZE: tl.constexpr = 1,
     IDENTITY_KV_INDICES: tl.constexpr = False,
     SCORE_MOD: tl.constexpr = None,
+    # SM70 FP8 KV passed as uint8 bytes: 0 off, 1 E4M3, 2 E5M2.
+    SM70_FP8: tl.constexpr = 0,
     Aux0=None,
     aux0_stride_t=0,
     aux0_stride_h=0,
@@ -609,6 +615,8 @@ def _fwd_kernel(
                 mask=(mask_n[None, :]) & (mask_d[:, None]),
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                k = fp8_sm70_to_fp32(k, SM70_FP8 == 2).to(tl.float16)
             # gfx1250: triton tl.dot(fp8, fp8) returns garbage (~1e34+) for contraction
             # dim K>=128 (K=64 ok). This prefix read fires when a radix-cache prefix is
             # reused (prefill reads the cached fp8 KV), and the MLA nope dot has K=512,
@@ -639,6 +647,8 @@ def _fwd_kernel(
                     mask=mask_n[None, :],
                     other=0.0,
                 )
+                if SM70_FP8 > 0:
+                    kpe = fp8_sm70_to_fp32(kpe, SM70_FP8 == 2).to(tl.float16)
                 if IS_GFX1250:
                     qk += tl.dot(qpe, kpe.to(qpe.dtype))
                 else:
@@ -702,6 +712,8 @@ def _fwd_kernel(
                 mask=mask_n[:, None] & mask_dv[None, :],
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                v = fp8_sm70_to_fp32(v, SM70_FP8 == 2).to(tl.float16)
             if USE_FP8_PREFIX:
                 p_dot = (p * FP8_MAX).to(v.dtype)
                 acc = acc * re_scale[:, None] + tl.dot(p_dot, v) * (v_scale / FP8_MAX)
@@ -1095,6 +1107,11 @@ def extend_attention_fwd(
         score_mod, aux_tensors
     )
 
+    sm70_fp8 = _sm70_fp8_kind(k_buffer, v_buffer)
+    if sm70_fp8:
+        # Triton has no FP8 operands on SM70; the kernel decodes the raw bytes.
+        k_buffer = k_buffer.view(torch.uint8)
+        v_buffer = v_buffer.view(torch.uint8)
     _fwd_kernel[grid](
         q_extend,
         k_extend,
@@ -1161,6 +1178,7 @@ def extend_attention_fwd(
         PAGE_SIZE=page_size,
         IDENTITY_KV_INDICES=identity_kv_indices,
         SCORE_MOD=score_mod,
+        SM70_FP8=sm70_fp8,
         Aux0=aux0,
         aux0_stride_t=aux0_stride_t,
         aux0_stride_h=aux0_stride_h,
@@ -1217,6 +1235,8 @@ def _fwd_kernel_unified(
     IS_GFX1250: tl.constexpr = False,
     PAGE_SIZE: tl.constexpr = 1,
     SCORE_MOD: tl.constexpr = None,
+    # SM70 FP8 KV passed as uint8 bytes: 0 off, 1 E4M3, 2 E5M2.
+    SM70_FP8: tl.constexpr = 0,
     Aux0=None,
     aux0_stride_t=0,
     aux0_stride_h=0,
@@ -1391,6 +1411,8 @@ def _fwd_kernel_unified(
                 mask=(mask_n[None, :]) & (mask_d[:, None]),
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                k = fp8_sm70_to_fp32(k, SM70_FP8 == 2).to(tl.float16)
 
             # gfx1250: triton tl.dot(fp8, fp8) returns garbage (~1e34+) for contraction
             # dim K>=128 (K=64 ok). This prefix read fires when a radix-cache prefix is
@@ -1422,6 +1444,8 @@ def _fwd_kernel_unified(
                     mask=mask_n[None, :],
                     other=0.0,
                 )
+                if SM70_FP8 > 0:
+                    kpe = fp8_sm70_to_fp32(kpe, SM70_FP8 == 2).to(tl.float16)
                 if IS_GFX1250:
                     qk += tl.dot(qpe, kpe.to(qpe.dtype))
                 else:
@@ -1479,6 +1503,8 @@ def _fwd_kernel_unified(
                 mask=mask_n[:, None] & mask_dv[None, :],
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                v = fp8_sm70_to_fp32(v, SM70_FP8 == 2).to(tl.float16)
             # keep softmax weights p in fp32 for the P·V dot (do not downcast to bf16)
             # on gfx1250; on other platforms restore the original p.to(v.dtype) cast.
             # TODO: remove this branch once the gfx1250 bf16 P·V issue is resolved.
@@ -1603,6 +1629,11 @@ def extend_attention_fwd_unified(
         score_mod, aux_tensors
     )
 
+    sm70_fp8 = _sm70_fp8_kind(k_buffer, v_buffer)
+    if sm70_fp8:
+        # Triton has no FP8 operands on SM70; the kernel decodes the raw bytes.
+        k_buffer = k_buffer.view(torch.uint8)
+        v_buffer = v_buffer.view(torch.uint8)
     _fwd_kernel_unified[grid](
         q,
         o,
@@ -1647,6 +1678,7 @@ def extend_attention_fwd_unified(
         IS_GFX1250=_is_gfx1250,
         PAGE_SIZE=page_size,
         SCORE_MOD=score_mod,
+        SM70_FP8=sm70_fp8,
         Aux0=aux0,
         aux0_stride_t=aux0_stride_t,
         aux0_stride_h=aux0_stride_h,

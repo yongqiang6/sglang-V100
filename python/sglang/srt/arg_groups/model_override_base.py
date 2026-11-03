@@ -331,6 +331,9 @@ def get_default_attn_backend(server_args: Any, use_mla_backend: bool, model_conf
             return "aiter"
         elif is_mps():
             return "torch_native"
+        elif get_platform().is_cuda and get_platform().device_sm == 70:
+            # On SM70 "triton" runs prefill and grouped decode in TileLang.
+            return "triton"
         else:
             # FlashInfer does not support attention sinks.
             if get_platform().has_flashinfer and not model_config.has_attention_sinks:

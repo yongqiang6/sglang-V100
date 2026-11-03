@@ -21,13 +21,22 @@ from sglang.srt.configs.linear_attn_model_registry import (
     get_linear_attn_config,
     import_backend_class,
 )
+from sglang.srt.environ import envs
 from sglang.srt.runtime_context import (
     get_exec,
     get_parallel,
     get_platform,
     get_spec,
 )
-from sglang.srt.utils import get_device_capability, is_hip, is_musa, is_npu, is_sail
+from sglang.srt.utils import (
+    get_device_capability,
+    get_device_sm,
+    is_cuda,
+    is_hip,
+    is_musa,
+    is_npu,
+    is_sail,
+)
 
 _is_musa = is_musa()
 _is_npu = is_npu()
@@ -248,7 +257,26 @@ def create_triton_backend(runner):
     )
     from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 
+    if _use_tilelang_v100_attention():
+        from sglang.srt.layers.attention.tilelang_v100_backend import (
+            TileLangV100AttnBackend,
+        )
+
+        return TileLangV100AttnBackend(runner)
     return TritonAttnBackend(runner)
+
+
+def _use_tilelang_v100_attention() -> bool:
+    """On SM70 the Triton backend runs prefill and grouped decode in TileLang."""
+    if envs.SGLANG_V100_DISABLE_TILELANG_ATTN.get():
+        return False
+    if not is_cuda() or get_device_sm() != 70:
+        return False
+    from sglang.srt.layers.attention.tilelang_v100_backend import (
+        tilelang_v100_available,
+    )
+
+    return tilelang_v100_available()
 
 
 @register_attention_backend("unlimited_ocr_v2")

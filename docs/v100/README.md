@@ -2,14 +2,14 @@
 
 This branch re-ports the V100 work from the `sglang-V100` fork (forked from
 upstream `cdd06011a`, 2026-06-01) onto current upstream SGLang, layer by layer.
-Steps 1 and 2 (environment and base runtime) are in place; the performance
-layers are not ported yet.
+Steps 1-3 (environment, base runtime, attention) are in place; the remaining
+performance layers are not ported yet.
 
 | Step | Scope | Status |
 | --- | --- | --- |
 | 1 | Environment: torch cu126, dependency overrides, patched FlashInfer, Docker/host installer, environment check | Done |
 | 2 | Base runtime: SM70 floor, `SGL_KERNEL_V100_ONLY` AOT build, FlashInfer SM<80 paths, `moe_sum_reduce` fallback | Done |
-| 3 | Attention: `tilelang_fa_v100` backend, `page_size=16` default, Triton decode tuning | Not started |
+| 3 | Attention: TileLang prefill/decode behind `triton`, `page_size=16` default, Triton SM70 decode tuning, FP8 KV on SM70 | Done |
 | 4 | GDN / linear attention retune, Qwen3.5/3.6 | Not started |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ, TurboMind FP8 and FP16 MoE, QPN8 | Not started |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Not started |
@@ -91,6 +91,42 @@ run shows they can be dropped.
 Upstream already selects FlashInfer (or Triton) as the default MHA backend on
 non-Hopper GPUs, so the fork's `server_args` default-backend change is not needed.
 
+## Step 3: attention
+
+The fork's standalone `tilelang_fa_v100` backend targeted the old CUDA-graph
+API. Upstream gates many features on the backend *name* (`"triton"` appears in
+hybrid-model, KV-dtype and model-override allowlists), so the port keeps the
+name and changes what it builds on SM70:
+
+- `layers/attention/tilelang_v100_backend.py`: `TileLangV100AttnBackend`
+  subclasses `TritonAttnBackend`. Metadata, CUDA graphs, speculative verify, SWA
+  and DCP stay on the inherited Triton code. It overrides only eager
+  EXTEND/MIXED prefill (TileLang paged kernel; page table built from the
+  physical slots `runner_ids.pack_read_stream` returns) and batch-1 grouped
+  G6/D256 decode. Unsupported layers (SWA, logit cap, cross/encoder attention,
+  MLA, other head dims) and any graph capture fall back to Triton.
+- `attention_registry.create_triton_backend` builds it on SM70 when TileLang
+  imports; `SGLANG_V100_DISABLE_TILELANG_ATTN=1` restores plain Triton.
+- Resolution: SM70 defaults to `--attention-backend triton` and, with it,
+  `--page-size 16`. `tilelang_fa_v100` / `flash_attn_v100` are deprecated
+  aliases for `triton`.
+- Kernels moved to `sglang/kernels/ops/attention/tilelang_fa_v100/` (TileLang)
+  and `sglang/kernels/jit/csrc/attention/` (CUDA long-context decode, QSA
+  combine). `T.gemm_v2` became `T.gemm` for tilelang 0.1.12.
+- Triton decode/extend kernels take an `SM70_FP8` constexpr: FP8 KV (E4M3 or
+  E5M2) is passed as bytes and decoded in-kernel, since Triton has no FP8
+  operands on SM70. The grouped decode tile is 16 on SM70, and
+  `TritonAttnBackend` raises `max_kv_splits` (up to 128, >=128 tokens per split)
+  to fill 80 SMs.
+- `runner/sm70_tilelang_warmup.py` compiles the prefill kernel for
+  power-of-two batch sizes during runner warmup.
+- The fork's `SGLANG_V100_*` / `SGLANG_SM70_QSA_COMBINE` knobs are registered in
+  `environ.py` under "NVIDIA V100 (SM70)" with their old names. Boolean values
+  now follow `EnvBool` (`true/1/yes/y`, `false/0/no/n`; `on/off` is no longer accepted).
+
+Deferred: the fork's saturating E5M2 KV writer (needs the TurboMind extension,
+step 5) and native linear speculative verify in the TileLang backend (step 6).
+
 ## Verification status
 
 Done without V100 hardware:
@@ -102,6 +138,16 @@ Done without V100 hardware:
 - The default (non-V100) configure still reaches and includes FlashMLA.
 - Patched FlashInfer `sampling.cu` / `renorm.cu` compile for `sm_70`.
 - The full serial build needs ~5.5 GiB per compiler process (see `safe_jobs.sh`).
+- Step 3, compiled for `sm_70` without a GPU: the patched Triton decode
+  (normal, grouped) and extend kernels with FP16, E5M2 and E4M3 KV and the
+  split-count kernel (Triton 3.8, `GPUTarget("cuda", 70)`); all 13 TileLang
+  kernel factories (paged prefill D64/128/256, sliding window, grouped decode,
+  linear verify, FP8 gather, dense D256 variants) with tilelang 0.1.12; and
+  `sm70_longctx_decode.cu` with nvcc 12.6. Unpatched, the grouped decode
+  kernel fails to compile for `sm_70` with E4M3 or E5M2 KV.
+- Resolution on a simulated SM70 platform is covered by
+  `test_model_overrides.py::test_sm70_defaults_to_triton_with_16_token_pages`.
 
 Still needs a V100: `check_v100_env.py` without `--no-gpu`, serving a model,
-CUDA graph capture and the FlashInfer JIT attention paths.
+CUDA graph capture, the FlashInfer JIT attention paths, and numerical checks of
+the TileLang and FP8 Triton attention against a reference.

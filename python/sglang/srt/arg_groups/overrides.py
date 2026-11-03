@@ -1436,6 +1436,14 @@ def _page_size_default(view: Any) -> dict:
             "SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d."
         )
         return {"page_size": 64}
+    if (
+        get_platform().is_cuda
+        and get_platform().device_sm == 70
+        and "triton" in attention_backends_of(view)
+    ):
+        # The SM70 TileLang paged kernels read 16-token pages.
+        logger.info("SM70 (V100): setting page_size=16 for TileLang attention.")
+        return {"page_size": 16}
     if not get_platform().is_musa:
         return {"page_size": 1}
     return {"page_size": 64}

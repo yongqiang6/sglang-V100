@@ -298,7 +298,13 @@ def handle_deprecated_args(server_args: Any):
         enable_flashinfer_allreduce_fusion=False,
     )
     # Deprecated attention-backend aliases.
-    aliases = {"compressed": "dsv4", "tokenspeed_mla": "cutedsl_mla"}
+    aliases = {
+        "compressed": "dsv4",
+        "tokenspeed_mla": "cutedsl_mla",
+        # sglang-V100 fork names; on SM70 "triton" now runs the TileLang kernels.
+        "tilelang_fa_v100": "triton",
+        "flash_attn_v100": "triton",
+    }
     renamed = {}
     for attr in (
         "attention_backend",

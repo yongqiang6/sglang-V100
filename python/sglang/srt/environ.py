@@ -1247,6 +1247,37 @@ class Envs:
     SGLANG_XPU_LN_MOD_NUM_WARPS = EnvInt(4)
 
     # ===================================================================
+    # NVIDIA V100 (SM70)
+    # ===================================================================
+    # Names kept from the sglang-V100 fork so existing launch scripts work.
+    # On SM70 the "triton" attention backend runs prefill and batch-1 grouped
+    # decode in TileLang; this falls back to plain Triton.
+    SGLANG_V100_DISABLE_TILELANG_ATTN = EnvBool(False)
+    # Grouped TileLang G6/D256 decode; FP8-KV prefill through FP16 scratch.
+    SGLANG_V100_GROUPED_DECODE = EnvBool(True)
+    SGLANG_V100_FP8_PREFILL_SCRATCH = EnvBool(True)
+    # Native CUDA long-context decode partial; JIT build directory.
+    SGLANG_V100_DECODE_CUDA = EnvBool(True)
+    SGLANG_V100_DECODE_CUDA_BUILD_DIR = EnvStr("/tmp/sglang_sm70_longctx_decode")
+    SGLANG_SM70_QSA_COMBINE = EnvBool(True)
+    # TileLang decode/verify split sizing; None keeps the kernel defaults.
+    SGLANG_V100_DECODE_TOKENS_PER_SPLIT = EnvInt(None)
+    SGLANG_V100_DECODE_BLOCK_M = EnvInt(64)
+    SGLANG_V100_VERIFY_TOKENS_PER_SPLIT = EnvInt(None)
+    SGLANG_V100_FP8_GATHER_THREADS = EnvInt(128)
+    # Dense D256 prefill routing; SPLIT_KV is "auto" or an explicit split count.
+    SGLANG_V100_PREFILL_D256_GATHER = EnvBool(True)
+    SGLANG_V100_PREFILL_D256_LOGICAL_TAIL = EnvBool(True)
+    SGLANG_V100_PREFILL_D256_SPLIT_KV = EnvStr("auto")
+    # Block-sparse long-prefix prefill (BFLA). KEEP_RATIO < 1 is approximate
+    # and additionally requires ALLOW_APPROXIMATE.
+    SGLANG_V100_BFLA_PREFILL = EnvBool(False)
+    SGLANG_V100_BFLA_MASK_BLOCK_N = EnvInt(256)
+    SGLANG_V100_BFLA_KEEP_RATIO = EnvFloat(1.0)
+    SGLANG_V100_BFLA_ALLOW_APPROXIMATE = EnvBool(False)
+    SGLANG_V100_BFLA_LOCAL_BLOCKS = EnvInt(8)
+
+    # ===================================================================
     # Quantization
     # ===================================================================
     SGLANG_INT4_WEIGHT = EnvBool(False)

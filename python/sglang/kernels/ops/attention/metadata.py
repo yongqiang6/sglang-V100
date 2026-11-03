@@ -17,6 +17,8 @@ def get_num_kv_splits_triton(
     device_core_count,
     MAX_NUM_SEQ: tl.constexpr,
     uneven_batch_ptr=None,
+    # SM70: tokens below which another split does not pay off; 0 disables.
+    SM70_MIN_SPLIT_TILE: tl.constexpr = 0,
 ):
     # TODO: this method is tunable, we need more online serving data to tune it
     offs_seq = tl.arange(0, MAX_NUM_SEQ)
@@ -45,9 +47,17 @@ def get_num_kv_splits_triton(
         # from triton_ops/decode_attention.py:_decode_grouped_att_m_fwd
         block_h = tl.minimum(block_h, num_kv_group)
         token_grid = num_seq * num_group * tl.cdiv(num_head, block_h)
-    max_kv_splits_2 = tl.minimum(
-        tl.cdiv(ext_device_core_count, token_grid), max_kv_splits
-    )
+    if SM70_MIN_SPLIT_TILE > 0:
+        occupancy_splits = tl.cdiv(max_kv_splits, token_grid)
+        context_splits = tl.cdiv(max_seq_len, SM70_MIN_SPLIT_TILE)
+        max_kv_splits_2 = tl.minimum(
+            tl.minimum(occupancy_splits, context_splits), max_kv_splits
+        )
+        max_kv_splits_2 = tl.maximum(max_kv_splits_2, 1)
+    else:
+        max_kv_splits_2 = tl.minimum(
+            tl.cdiv(ext_device_core_count, token_grid), max_kv_splits
+        )
     kv_chunk_size_2 = tl.cdiv(max_seq_len, max_kv_splits_2)
 
     num_kv_splits = tl.maximum(

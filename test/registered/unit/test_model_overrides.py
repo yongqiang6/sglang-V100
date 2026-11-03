@@ -830,6 +830,37 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         set_global_server_args_for_scheduler(server_args)
         return get_server_args()
 
+    def test_sm70_defaults_to_triton_with_16_token_pages(self):
+        """SM70 resolves to triton (TileLang kernels) on 16-token pages; an
+        explicit backend and non-SM70 GPUs keep their existing defaults."""
+        facts = dict(
+            is_cuda=True,
+            is_hip=False,
+            is_sm90=False,
+            is_sm100=False,
+            is_hopper_with_cuda_12_3=False,
+            has_flashinfer=True,
+        )
+        cases = [
+            (70, {}, ("triton", 16)),
+            (70, {"attention_backend": "tilelang_fa_v100"}, ("triton", 16)),
+            (70, {"attention_backend": "flashinfer"}, ("flashinfer", 1)),
+            (80, {}, ("flashinfer", 1)),
+        ]
+        for device_sm, server_kwargs, expected in cases:
+            with (
+                self.subTest(device_sm=device_sm, **server_kwargs),
+                override_platform(device_sm=device_sm, **facts),
+            ):
+                sa = self._construct("LlamaForCausalLM", "llama", **server_kwargs)
+                self.assertEqual(
+                    (
+                        self._resolved(sa, "attention_backend"),
+                        self._resolved(sa, "page_size"),
+                    ),
+                    expected,
+                )
+
     def test_explicit_extra_buffer_without_mamba_state_fails_fast(self):
         with self.assertRaisesRegex(ValueError, "needs mamba state"):
             self._construct(

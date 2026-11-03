@@ -53,6 +53,7 @@ from sglang.srt.speculative.spec_utils import (
 from sglang.srt.utils import (
     get_bool_env_var,
     get_device_core_count,
+    get_device_sm,
     get_int_env_var,
     is_cuda,
     is_gfx95_supported,
@@ -374,6 +375,30 @@ class TritonAttnBackend(AttentionBackend):
                 self.max_context_len + self.split_tile_size - 1
             ) // self.split_tile_size
 
+        self.sm70_min_split_tile = 0
+        if (
+            _is_cuda
+            and get_device_sm() == 70
+            and not self.use_mla
+            and self.split_tile_size is None
+            and self.num_kv_head > 0
+            and self.device_core_count > 0
+        ):
+            # V100 has 80 SMs and few KV heads per rank: raise the split count so
+            # decode fills the GPU, capped at 128 (measured on V100). 128 tokens is
+            # the measured split crossover for Qwen GQA head_dim 256.
+            self.max_kv_splits = min(
+                128,
+                max(
+                    next_power_of_2(
+                        (self.device_core_count + self.num_kv_head - 1)
+                        // self.num_kv_head
+                    ),
+                    self.max_kv_splits,
+                ),
+            )
+            self.sm70_min_split_tile = 128
+
         assert not (
             model_runner.sliding_window_size is not None
             and model_runner.model_config.is_encoder_decoder
@@ -480,6 +505,7 @@ class TritonAttnBackend(AttentionBackend):
             self.device_core_count,
             MAX_NUM_SEQ=SCHEDULE_SEQ,
             uneven_batch_ptr=uneven_batch,
+            SM70_MIN_SPLIT_TILE=self.sm70_min_split_tile,
         )
 
     def _dcp_lens(self, lens: torch.Tensor, start: Optional[torch.Tensor] = None):

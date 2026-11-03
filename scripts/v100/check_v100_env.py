@@ -91,6 +91,15 @@ def check_flashinfer() -> None:
     )
 
 
+def check_tilelang() -> None:
+    try:
+        import tilelang
+    except Exception as e:  # noqa: BLE001
+        _check("tilelang imports (SM70 attention kernels)", False, repr(e))
+        return
+    _check("tilelang imports (SM70 attention kernels)", True, tilelang.__version__)
+
+
 def _sgl_kernel_dir() -> Path | None:
     spec = importlib.util.find_spec("sgl_kernel")
     if spec is None or spec.origin is None:
@@ -171,6 +180,7 @@ def main() -> int:
     check_torch()
     check_cuda_runtime_consistency()
     check_flashinfer()
+    check_tilelang()
     check_sgl_kernel_build()
     if not args.no_gpu:
         check_gpu()

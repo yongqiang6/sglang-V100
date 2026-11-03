@@ -47,6 +47,9 @@ from sglang.srt.model_executor.runner.flashinfer_autotune import (
     run_flashinfer_autotune_forward,
     should_run_flashinfer_autotune,
 )
+from sglang.srt.model_executor.runner.sm70_tilelang_warmup import (
+    maybe_warmup_sm70_tilelang_prefill,
+)
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
@@ -284,6 +287,7 @@ class BaseRunner(ABC):
             )
             self._flashinfer_autotune(buffers=buffers, batch_size=batch_size)
             maybe_flashinfer_autotune_extend(self, decode_num_tokens=batch_size)
+        maybe_warmup_sm70_tilelang_prefill(self)
 
         if (
             envs.SGLANG_PP_PARALLEL_DEEPGEMM_WARMUP.get()

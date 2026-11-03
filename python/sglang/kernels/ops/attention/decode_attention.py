@@ -29,6 +29,7 @@ import triton
 import triton.language as tl
 
 from sglang.kernels.arch import current_arch
+from sglang.kernels.ops.attention.fp8_sm70 import fp8_sm70_to_fp32
 from sglang.kernels.ops.attention.score_mod import unpack_aux_tensors
 from sglang.srt.environ import envs
 from sglang.srt.utils import (
@@ -260,6 +261,8 @@ def _fwd_kernel_stage1(
     xai_temperature_len: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     SCORE_MOD: tl.constexpr = None,
+    # SM70 FP8 KV passed as uint8 bytes: 0 off, 1 E4M3, 2 E5M2.
+    SM70_FP8: tl.constexpr = 0,
     Aux0=None,
     aux0_stride_t=0,
     aux0_stride_h=0,
@@ -338,6 +341,8 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                k = fp8_sm70_to_fp32(k, SM70_FP8 == 2).to(tl.float16)
             # Reduce in fp32; a bf16 tl.sum rounds each partial sum in compiler order.
             # Cast the product, not q and k, to avoid a fp32 [BLOCK_N, D] tile.
             qk = tl.sum((q[None, :] * k).to(tl.float32), 1)
@@ -383,6 +388,8 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                v = fp8_sm70_to_fp32(v, SM70_FP8 == 2).to(tl.float16)
 
             n_e_max = tl.maximum(tl.max(qk, 0), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -435,6 +442,7 @@ def _decode_att_m_fwd(
     score_mod=None,
     aux_tensors=None,
     uneven_batch=None,
+    sm70_fp8: int = 0,
 ):
     BLOCK = 64
     # [TODO] work around SGPR limit on MI3xx
@@ -508,6 +516,7 @@ def _decode_att_m_fwd(
         Lv=Lv,
         PAGE_SIZE=page_size,
         SCORE_MOD=score_mod,
+        SM70_FP8=sm70_fp8,
         Aux0=aux0,
         aux0_stride_t=aux0_stride_t,
         aux0_stride_h=aux0_stride_h,
@@ -559,6 +568,8 @@ def _fwd_grouped_kernel_stage1(
     IS_GFX1250: tl.constexpr = False,
     PAGE_SIZE: tl.constexpr = 1,
     SCORE_MOD: tl.constexpr = None,
+    # SM70 FP8 KV passed as uint8 bytes: 0 off, 1 E4M3, 2 E5M2.
+    SM70_FP8: tl.constexpr = 0,
     Aux0=None,
     aux0_stride_t=0,
     aux0_stride_h=0,
@@ -648,6 +659,8 @@ def _fwd_grouped_kernel_stage1(
         # TODO: remove this branch once the gfx1250 fp8 tl.dot issue is resolved.
         if IS_GFX1250:
             q_k = q
+        elif SM70_FP8 > 0:
+            q_k = q.to(tl.float16)
         else:
             q_k = q.to(K_Buffer.dtype.element_ty)
         if BLOCK_DPE > 0:
@@ -677,6 +690,8 @@ def _fwd_grouped_kernel_stage1(
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
             )
+            if SM70_FP8 > 0:
+                k = fp8_sm70_to_fp32(k, SM70_FP8 == 2).to(tl.float16)
             if IS_GFX1250:
                 qk = tl.dot(q_k, k.to(q_k.dtype))
             else:
@@ -695,6 +710,8 @@ def _fwd_grouped_kernel_stage1(
                     mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
                 )
+                if SM70_FP8 > 0:
+                    kpe = fp8_sm70_to_fp32(kpe, SM70_FP8 == 2).to(tl.float16)
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale_withk
 
@@ -737,6 +754,8 @@ def _fwd_grouped_kernel_stage1(
                     mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                     other=0.0,
                 )
+                if SM70_FP8 > 0:
+                    v = fp8_sm70_to_fp32(v, SM70_FP8 == 2).to(tl.float16)
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -805,10 +824,14 @@ def _decode_grouped_att_m_fwd(
     tune_mla: bool = False,
     forced_kv_splits: int = 0,
     uneven_batch=None,
+    sm70_fp8: int = 0,
 ):
     BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
+    if not _is_hip and current_arch().is_sm(7, 0):
+        # Measured on V100: 16 matches the Volta WMMA tile and beat 32.
+        BLOCK = 16
 
     # [TODO] work around shmem limit on MI3xx
     if _is_hip and Lk >= 576:
@@ -910,6 +933,7 @@ def _decode_grouped_att_m_fwd(
         IS_GFX1250=_is_gfx1250,
         PAGE_SIZE=page_size,
         SCORE_MOD=score_mod,
+        SM70_FP8=sm70_fp8,
         Aux0=aux0,
         aux0_stride_t=aux0_stride_t,
         aux0_stride_h=aux0_stride_h,
@@ -1084,6 +1108,7 @@ def decode_attention_fwd_normal(
     score_mod=None,
     aux_tensors=None,
     uneven_batch=None,
+    sm70_fp8: int = 0,
 ):
     _decode_att_m_fwd(
         q,
@@ -1102,6 +1127,7 @@ def decode_attention_fwd_normal(
         score_mod=score_mod,
         aux_tensors=aux_tensors,
         uneven_batch=uneven_batch,
+        sm70_fp8=sm70_fp8,
     )
     _decode_softmax_reducev_fwd(
         attn_logits,
@@ -1139,6 +1165,7 @@ def decode_attention_fwd_grouped(
     score_mod=None,
     aux_tensors=None,
     uneven_batch=None,
+    sm70_fp8: int = 0,
 ):
     tune_mla, forced_kv_splits = _mla_launch_plan(q, k_buffer, max_kv_splits, has_mla)
     _decode_grouped_att_m_fwd(
@@ -1162,6 +1189,7 @@ def decode_attention_fwd_grouped(
         tune_mla=tune_mla,
         forced_kv_splits=forced_kv_splits,
         uneven_batch=uneven_batch,
+        sm70_fp8=sm70_fp8,
     )
     _decode_softmax_reducev_fwd(
         attn_logits,
@@ -1215,6 +1243,12 @@ def decode_attention_fwd(
     # head_num lives at dim 1 (3-D) or dim 2 (4-D shared view).
     kv_head_num = v_buffer.shape[-2]
     kv_group_num = q.shape[1] // kv_head_num
+
+    sm70_fp8 = _sm70_fp8_kind(k_buffer, v_buffer)
+    if sm70_fp8:
+        # Triton has no FP8 operands on SM70; the kernels decode the raw bytes.
+        k_buffer = k_buffer.view(torch.uint8)
+        v_buffer = v_buffer.view(torch.uint8)
 
     # Work-Centric (Lean) Attention: a persistent-CTA + work-stealing decode kernel
     # that helps on long sequences where there are many more KV tiles than CUs. The
@@ -1279,6 +1313,7 @@ def decode_attention_fwd(
             score_mod=score_mod,
             aux_tensors=aux_tensors,
             uneven_batch=uneven_batch,
+            sm70_fp8=sm70_fp8,
         )
     else:
         # GQA/MQA/MLA
@@ -1304,7 +1339,19 @@ def decode_attention_fwd(
             score_mod=score_mod,
             aux_tensors=aux_tensors,
             uneven_batch=uneven_batch,
+            sm70_fp8=sm70_fp8,
         )
+
+
+def _sm70_fp8_kind(k_buffer: torch.Tensor, v_buffer: torch.Tensor) -> int:
+    """SM70_FP8 kernel flag for an FP8 KV cache on Volta: 0 off, 1 E4M3, 2 E5M2."""
+    if _is_hip or k_buffer.dtype != v_buffer.dtype or not k_buffer.is_cuda:
+        return 0
+    if k_buffer.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return 0
+    if not current_arch().is_sm(7, 0):
+        return 0
+    return 2 if k_buffer.dtype == torch.float8_e5m2 else 1
 
 
 # ============================================================================
