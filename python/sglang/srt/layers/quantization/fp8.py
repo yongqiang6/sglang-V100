@@ -79,6 +79,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     use_aiter_bpreshuffle_gemm,
 )
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
+from sglang.srt.layers.quantization.marlin_utils import marlin_uses_sm70_layout
 from sglang.srt.layers.quantization.marlin_utils_fp8 import prepare_fp8_layer_for_marlin
 from sglang.srt.layers.quantization.mxfp8_input import Mxfp8SwizzledInput
 from sglang.srt.layers.quantization.unquant import (
@@ -335,6 +336,9 @@ class Fp8Config(QuantizationConfig):
             return 95
         if self.use_mxfp8 and _mxfp8_to_block_fp8_required:
             return 94
+        if not self.use_mxfp8 and marlin_uses_sm70_layout():
+            # Weight-only FP8 Marlin through marlin_v100.
+            return 70
 
         return 100 if self.use_mxfp8 else 80
 

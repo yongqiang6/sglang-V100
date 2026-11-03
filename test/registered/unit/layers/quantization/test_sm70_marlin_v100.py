@@ -11,7 +11,8 @@ import torch
 
 from sglang.kernels.ops.gemm import sm70_marlin_v100
 from sglang.kernels.ops.moe.moe_wna16_marlin import moe_wna16_marlin_gemm
-from sglang.srt.layers.quantization import marlin_utils
+from sglang.srt.layers.quantization import fp8_utils, marlin_utils
+from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.gptq.gptq import GPTQMarlinConfig
 from sglang.srt.layers.quantization.utils import get_scalar_types, pack_cols
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -116,6 +117,18 @@ class TestSm70MarlinV100(CustomTestCase):
         self.assertNotIn(scalar_types.float4_e2m1f, supported)
         self.assertTrue(promote)
         self.assertFalse(promote_act_order)
+
+    def test_fp8_marlin_on_sm70_requires_marlin_v100(self):
+        """FP8 checkpoints load on SM70 only as weight-only Marlin, which needs
+        marlin_v100; without it the SM80 floor must stay."""
+        config = Fp8Config(is_checkpoint_fp8_serialized=True)
+        with patch.object(fp8_utils, "get_device_capability", lambda: (7, 0)):
+            self.assertFalse(fp8_utils.can_auto_enable_marlin_fp8())
+            self.assertEqual(config.get_min_capability(), 80)
+            with ExitStack() as stack:
+                _sm70_marlin_v100_active(stack)
+                self.assertTrue(fp8_utils.can_auto_enable_marlin_fp8())
+                self.assertEqual(config.get_min_capability(), 70)
 
 
 if __name__ == "__main__":

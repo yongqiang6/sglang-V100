@@ -205,6 +205,11 @@ is only needed below CUDA 12.8.
   (`desc_act`) GPTQ, which marlin_v100 rejects. FP4 Marlin (NVFP4/MXFP4) raises
   on SM70 until its scale encoding is ported (step 7).
 - `fused_marlin_moe` uses the Triton `moe_sum_reduce` below SM80.
+- FP8 checkpoints: `Fp8Config` admits SM70 and FP8 linear layers auto-select
+  weight-only FP8 Marlin (`can_auto_enable_marlin_fp8`) when marlin_v100 is
+  loaded; the fork reached the same state through a generic loader bypass. FP8
+  MoE layers are not supported on SM70 (no Triton FP8 there; the fork did not
+  target them either).
 - Kernel limits on SM70: FP16 activations/outputs only, `size_n % 64 == 0`,
   `size_k % 32 == 0`, groups -1/32/64/128 (FP8: -1/128).
 
