@@ -45,6 +45,7 @@ from sglang.kernels.ops.kvcache.cache_move import (
     set_kv_buffer_prefix_valid_tiled_fp8,
 )
 from sglang.kernels.ops.kvcache.cache_ops import launch_reshape_and_cache_flash
+from sglang.kernels.ops.kvcache.e5m2_satfinite import fp16_to_e5m2_satfinite
 from sglang.kernels.ops.kvcache.kvcache import can_use_store_cache, store_cache
 from sglang.kernels.ops.kvcache.mla_buffer import (
     get_mla_kv_buffer_triton,
@@ -100,6 +101,7 @@ from sglang.srt.utils import (
 from sglang.srt.utils.async_probe import (
     maybe_detect_oob,
 )
+from sglang.srt.utils.common import get_device_sm
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
 if TYPE_CHECKING:
@@ -2123,7 +2125,10 @@ def _set_mha_kv_buffer_prefix_valid(
         return
 
     # fallback: eager quantization
-    if cache_k.dtype != pool.dtype:
+    if cache_k.dtype != pool.dtype and pool.sm70_e5m2_satfinite:
+        cache_k = fp16_to_e5m2_satfinite(cache_k, k_scale)
+        cache_v = fp16_to_e5m2_satfinite(cache_v, v_scale)
+    elif cache_k.dtype != pool.dtype:
         if k_scale is not None:
             cache_k.div_(k_scale)
         if v_scale is not None:
@@ -2180,6 +2185,11 @@ class MHATokenToKVPool(KVCache, MHAKVView):
     ):
         self.k_buffer = None
         self.v_buffer = None
+        # SM70 has no FP8 cast, and Tensor.to(float8_e5m2) overflows to inf past
+        # 57344; write E5M2 through the saturating Triton cast there instead.
+        self.sm70_e5m2_satfinite = (
+            dtype == torch.float8_e5m2 and _is_cuda and get_device_sm() == 70
+        )
         if not _is_npu:
             self.k_data_ptrs = None
             self.v_data_ptrs = None
@@ -2905,7 +2915,10 @@ class MHATokenToKVPool(KVCache, MHAKVView):
             )
             return
 
-        if cache_k.dtype != self.dtype:
+        if cache_k.dtype != self.dtype and self.sm70_e5m2_satfinite:
+            cache_k = fp16_to_e5m2_satfinite(cache_k, k_scale)
+            cache_v = fp16_to_e5m2_satfinite(cache_v, v_scale)
+        elif cache_k.dtype != self.dtype:
             if k_scale is not None:
                 cache_k.div_(k_scale)
             if v_scale is not None:

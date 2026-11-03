@@ -137,8 +137,14 @@ name and changes what it builds on SM70:
   `environ.py` under "NVIDIA V100 (SM70)" with their old names. Boolean values
   now follow `EnvBool` (`true/1/yes/y`, `false/0/no/n`; `on/off` is no longer accepted).
 
-Deferred: the fork's saturating E5M2 KV writer (needs the TurboMind extension,
-step 5) and native linear speculative verify in the TileLang backend (step 6).
+Deferred: native linear speculative verify in the TileLang backend (step 6).
+
+E5M2 KV writes: `Tensor.to(torch.float8_e5m2)` rounds FP16 magnitudes above
+57344 to infinity. On SM70 `MHATokenToKVPool` writes E5M2 through
+`kernels/ops/kvcache/e5m2_satfinite.py`, a Triton cast that matches torch's
+round-to-nearest-even bit for bit where torch stays finite and saturates
+elsewhere (the fork's TurboMind-built CUDA writer, reimplemented without the
+extension; the scatter stays the existing store kernel).
 
 ## Step 4: GDN (Qwen3.5 / Qwen3.6 linear attention)
 
@@ -235,6 +241,10 @@ Done without V100 hardware:
 - Resolution on a simulated SM70 platform is covered by
   `test_model_overrides.py::test_sm70_defaults_to_triton_with_16_token_pages`.
 
+- E5M2 KV cast: bit-exact with torch on every in-range FP16 value and
+  saturating on the rest (all 65536 patterns, Triton interpreter); compiles for
+  `sm_70`. `test/registered/kernels/ops/kvcache/test_e5m2_satfinite.py` runs it
+  on GPU.
 - Step 5a: the three marlin_v100 patches apply at the pinned revision. Without
   `marlin-v100-torch-cxx20.patch` its C++17 build fails on torch 2.14's headers;
   with it, `setup_v100_marlin.sh` compiles marlin_v100 for `sm_70` with nvcc 12.8
