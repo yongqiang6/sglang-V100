@@ -13,7 +13,7 @@ remaining performance layers are not ported yet.
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ (done); TurboMind FP8 and FP16 MoE, QPN8 | In progress |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | In progress |
-| 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | Not started |
+| 7 | Qwen3.8 Flash Next and MiniMax-H3 SM70 deltas | In progress (NVFP4 done) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -202,8 +202,8 @@ is only needed below CUDA 12.8.
   on SM70 a caller-provided output is zeroed when `zero_inactive_output` is set.
 - `gptq_marlin` / `awq_marlin` report SM70 as supported when the library is
   loaded, so `gptq`/`awq` checkpoints are promoted as on SM80+, except act-order
-  (`desc_act`) GPTQ, which marlin_v100 rejects. FP4 Marlin (NVFP4/MXFP4) raises
-  on SM70 until its scale encoding is ported (step 7).
+  (`desc_act`) GPTQ, which marlin_v100 rejects. NVFP4 Marlin runs on SM70 (see
+  step 7); MXFP4 Marlin raises there.
 - `fused_marlin_moe` uses the Triton `moe_sum_reduce` below SM80.
 - FP8 checkpoints: `Fp8Config` admits SM70 and FP8 linear layers auto-select
   weight-only FP8 Marlin (`can_auto_enable_marlin_fp8`) when marlin_v100 is
@@ -240,6 +240,27 @@ Not ported, by design:
   model-agnostic and written against the fork's DFlash, which upstream's
   DFlash v2 has since replaced; they are not V100 adaptations.
 
+## Step 7: Qwen3.8 Flash Next and MiniMax-H3
+
+Upstream now ships Qwen3.8 Flash Next (`models/qwen4_exp.py`, MTP, PLE), so this
+step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
+(`multimodal_gen`).
+
+- NVFP4 on SM70: upstream already falls back to weight-only FP4 Marlin below
+  Blackwell (SM80-99). `fp4_utils.nvfp4_uses_marlin` extends that to SM70 when
+  marlin_v100 is loaded (FP4 GEMM `auto` backend, the NVFP4 MoE Marlin fallback
+  and `ModelOptFp4Config`'s capability floor). The rest of upstream's FP4 Marlin
+  prep already produces marlin_v100's layout: logical scales on SM70 and the
+  same S0E5M3 scale encoding as the fork's SM70 helper. The one difference is
+  the global scale, which marlin_v100 reads as FP32 (one per expert for MoE);
+  on SM70 it is computed from the FP32 checkpoint value. FP16 activations only
+  (always the case on V100).
+
+Not ported yet: the fork's Qwen3.8 NVFP4 decode kernel and per-shape Marlin
+geometry selection (`sm70_nvfp4_moe_decode`), the SM70 Qwen fusions
+(`sm70_qwen_fusions`, HC mix/gate, dense GEMV), PLE offload changes, the
+PCIe P2P custom all-reduce, and MiniMax-H3 diffusion on V100.
+
 ## Verification status
 
 Done without V100 hardware:
@@ -272,6 +293,9 @@ Done without V100 hardware:
   saturating on the rest (all 65536 patterns, Triton interpreter); compiles for
   `sm_70`. `test/registered/kernels/ops/kvcache/test_e5m2_satfinite.py` runs it
   on GPU.
+- Step 7: NVFP4 on SM70 is covered at the contract level (FP32 global scale,
+  capability gates, MXFP4 rejection) in `test_sm70_marlin_v100.py`; no NVFP4
+  checkpoint has been run.
 - Step 6: in the Triton interpreter, FP16-state chain verify equals T
   sequential decodes bit for bit (23.6% of outputs differ without the reload),
   and the SM70 BV=8 verify launch equals BV=32

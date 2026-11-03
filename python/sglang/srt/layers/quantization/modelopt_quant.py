@@ -38,6 +38,7 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.quantization.fp4_utils import (
     fp4_quantize,
     get_fp4_gemm_runner_backend,
+    nvfp4_uses_marlin,
 )
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod, Fp8MoEMethod
 from sglang.srt.layers.quantization.fp8_utils import (
@@ -48,6 +49,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     flashinfer_per_tensor_fp8_supported,
 )
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
+from sglang.srt.layers.quantization.marlin_utils import marlin_uses_sm70_layout
 from sglang.srt.layers.quantization.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     prepare_moe_nvfp4_layer_for_marlin,
@@ -1547,7 +1549,8 @@ class ModelOptFp4Config(ModelOptQuantConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        # SM70 runs NVFP4 as weight-only Marlin through marlin_v100.
+        return 70 if marlin_uses_sm70_layout() else 80
 
     def can_fuse_shared_expert(self) -> bool:
         # A shared-expert body kept BF16 via exclude_modules cannot share the packed
@@ -2376,7 +2379,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             )
         if (moe_runner_backend.is_auto() or moe_runner_backend.is_lora()) and is_cuda():
             capability = get_device_capability()
-            use_marlin_fallback = (8, 0) <= capability < (10, 0)
+            use_marlin_fallback = nvfp4_uses_marlin(capability)
         else:
             use_marlin_fallback = moe_runner_backend.is_marlin()
         if not get_platform().is_blackwell and not use_marlin_fallback:
@@ -3115,7 +3118,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
         moe_runner_backend = get_moe_runner_backend()
 
         if moe_runner_backend.is_auto():
-            if is_cuda() and (8, 0) <= get_device_capability() < (10, 0):
+            if is_cuda() and nvfp4_uses_marlin(get_device_capability()):
                 moe_runner_backend = MoeRunnerBackend.MARLIN
             else:
                 # TRTLLM is currently the most performant and tested FP4 MoE

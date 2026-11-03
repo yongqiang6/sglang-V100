@@ -11,9 +11,15 @@ import torch
 
 from sglang.kernels.ops.gemm import sm70_marlin_v100
 from sglang.kernels.ops.moe.moe_wna16_marlin import moe_wna16_marlin_gemm
-from sglang.srt.layers.quantization import fp8_utils, marlin_utils
+from sglang.srt.layers.quantization import (
+    fp4_utils,
+    fp8_utils,
+    marlin_utils,
+    marlin_utils_fp4,
+)
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.gptq.gptq import GPTQMarlinConfig
+from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config
 from sglang.srt.layers.quantization.utils import get_scalar_types, pack_cols
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -91,9 +97,9 @@ class TestSm70MarlinV100(CustomTestCase):
         library_gemm.assert_called_once()
         self.assertTrue(bool((c == 0).all()))
 
-    def test_sm70_support_excludes_fp4_and_act_order_promotion(self):
-        """FP4 Marlin needs an SM70 scale encoding that is not ported, and
-        marlin_v100 rejects act-order g_idx, so neither may be selected."""
+    def test_sm70_marlin_support_and_act_order_promotion(self):
+        """SM70 Marlin support exists only with marlin_v100 loaded, and act-order
+        GPTQ, whose g_idx marlin_v100 rejects, must not be promoted to it."""
         self.assertEqual(
             marlin_utils.query_marlin_supported_quant_types(device_capability=70), []
         )
@@ -114,9 +120,28 @@ class TestSm70MarlinV100(CustomTestCase):
             )
         self.assertIn(scalar_types.uint4b8, supported)
         self.assertIn(scalar_types.uint4, supported)
-        self.assertNotIn(scalar_types.float4_e2m1f, supported)
         self.assertTrue(promote)
         self.assertFalse(promote_act_order)
+
+    def test_sm70_nvfp4_global_scale_is_fp32_and_mxfp4_is_rejected(self):
+        """marlin_v100 requires an FP32 NVFP4 global scale (one per expert) with
+        the FP16 exponent bias folded in; its MXFP4 path is not wired."""
+        global_scale = torch.tensor([0.5, 0.25], dtype=torch.float32, device="cpu")
+        sm80 = marlin_utils_fp4._nvfp4_marlin_global_scale(global_scale, torch.half)
+        self.assertEqual(sm80.dtype, torch.half)
+        self.assertFalse(fp4_utils.nvfp4_uses_marlin((7, 0)))
+        self.assertTrue(fp4_utils.nvfp4_uses_marlin((8, 9)))
+        self.assertEqual(ModelOptFp4Config.get_min_capability(), 80)
+        with ExitStack() as stack:
+            _sm70_marlin_v100_active(stack)
+            self.assertTrue(fp4_utils.nvfp4_uses_marlin((7, 0)))
+            self.assertEqual(ModelOptFp4Config.get_min_capability(), 70)
+            sm70 = marlin_utils_fp4._nvfp4_marlin_global_scale(global_scale, torch.half)
+            with self.assertRaises(NotImplementedError):
+                marlin_utils_fp4._reject_sm70_mxfp4_marlin()
+        self.assertEqual(sm70.dtype, torch.float32)
+        torch.testing.assert_close(sm70, global_scale * 2**7, rtol=0, atol=0)
+        torch.testing.assert_close(sm80.float(), sm70, rtol=0, atol=0)
 
     def test_fp8_marlin_on_sm70_requires_marlin_v100(self):
         """FP8 checkpoints load on SM70 only as weight-only Marlin, which needs

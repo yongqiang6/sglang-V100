@@ -140,14 +140,28 @@ def apply_fp4_marlin_linear(
     return output.reshape(out_shape)
 
 
-def _reject_sm70_fp4_marlin() -> None:
-    # marlin_v100 reads FP4 scales in its own S0E5M3 encoding, not ported yet.
+def _reject_sm70_mxfp4_marlin() -> None:
+    # marlin_v100's MXFP4 (E8M0 scale) path has not been checked against this prep.
     if marlin_uses_sm70_layout():
-        raise NotImplementedError("FP4 Marlin is not supported on SM70 (V100) yet.")
+        raise NotImplementedError("MXFP4 Marlin is not supported on SM70 (V100) yet.")
+
+
+def _nvfp4_marlin_global_scale(
+    global_scale: torch.Tensor, param_dtype: torch.dtype
+) -> torch.Tensor:
+    """marlin_v100 (SM70) reads the NVFP4 global scale as FP32 and computes it
+    from the FP32 checkpoint value; SM80+ Marlin reads it in the activation dtype."""
+    if not marlin_uses_sm70_layout():
+        return nvfp4_marlin_process_global_scale(global_scale.to(param_dtype))
+    if param_dtype != torch.float16:
+        raise RuntimeError("SM70 NVFP4 Marlin requires FP16 activations.")
+    # Same exponent bias as nvfp4_marlin_process_global_scale for FP16.
+    exponent_bias = 2 ** (5 - 1) - 2 ** (2 - 1)
+    scale = global_scale.to(torch.float32) * (2.0 ** (exponent_bias - 7))
+    return scale.reshape(-1).contiguous()
 
 
 def prepare_nvfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
-    _reject_sm70_fp4_marlin()
     if getattr(layer, "quant_config", None) is not None:
         group_size = layer.quant_config.group_size
         if group_size != 16:
@@ -210,8 +224,9 @@ def prepare_nvfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     weight_scale = nvfp4_marlin_process_scales(weight_scale)
     layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
-    weight_global_scale = layer.weight_global_scale.to(param_dtype)
-    weight_global_scale = nvfp4_marlin_process_global_scale(weight_global_scale)
+    weight_global_scale = _nvfp4_marlin_global_scale(
+        layer.weight_global_scale, param_dtype
+    )
     layer.weight_global_scale = torch.nn.Parameter(
         weight_global_scale, requires_grad=False
     )
@@ -222,7 +237,7 @@ def prepare_nvfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
 
 def prepare_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
-    _reject_sm70_fp4_marlin()
+    _reject_sm70_mxfp4_marlin()
     group_size = 32
     if getattr(layer, "quant_config", None) is not None:
         configured = layer.quant_config.group_size
@@ -426,7 +441,7 @@ def _permute_moe_fp4_scales_for_marlin(
 
 
 def prepare_moe_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
-    _reject_sm70_fp4_marlin()
+    _reject_sm70_mxfp4_marlin()
     group_size = 32
     w13 = layer.w13_weight.data
     w2 = layer.w2_weight.data
@@ -561,7 +576,6 @@ def prepare_moe_nvfp4_layer_for_marlin(
     # compressed-tensors carries the group size on the per-layer scheme rather
     # than on layer.quant_config (which the MoE weight loader owns), so callers
     # outside ModelOpt pass it in.
-    _reject_sm70_fp4_marlin()
     if group_size is None:
         group_size = layer.quant_config.group_size
     if group_size != 16:
@@ -608,7 +622,7 @@ def prepare_moe_nvfp4_layer_for_marlin(
     w2_size_n, w2_size_k = hidden_size, intermediate_size
 
     def _process_global_scale(global_scale: torch.Tensor) -> torch.Tensor:
-        return nvfp4_marlin_process_global_scale(global_scale.to(param_dtype))
+        return _nvfp4_marlin_global_scale(global_scale, param_dtype)
 
     def _permute_bias(bias: torch.Tensor | None) -> torch.Tensor | None:
         if bias is None:

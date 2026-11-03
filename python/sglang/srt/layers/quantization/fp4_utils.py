@@ -146,6 +146,18 @@ class Fp4GemmRunnerBackend(Enum):
 FP4_GEMM_RUNNER_BACKEND: Fp4GemmRunnerBackend | None = None
 
 
+def nvfp4_uses_marlin(capability: tuple[int, int]) -> bool:
+    """NVFP4 below Blackwell runs on weight-only Marlin: SM80-SM99, and SM70
+    through marlin_v100 when it is installed."""
+    if capability == (7, 0):
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_uses_sm70_layout,
+        )
+
+        return marlin_uses_sm70_layout()
+    return (8, 0) <= capability < (10, 0)
+
+
 def initialize_fp4_gemm_config() -> None:
     """Initialize the FP4 GEMM backend from the published configuration."""
     global FP4_GEMM_RUNNER_BACKEND
@@ -154,7 +166,7 @@ def initialize_fp4_gemm_config() -> None:
     if backend == "auto":
         if get_platform().is_sm100:
             backend = "flashinfer_cutedsl"
-        elif is_cuda() and (10, 0) > get_device_capability() >= (8, 0):
+        elif is_cuda() and nvfp4_uses_marlin(get_device_capability()):
             backend = "marlin"
         else:
             backend = "flashinfer_cutlass"
