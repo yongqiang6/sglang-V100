@@ -339,6 +339,13 @@ class HiMambaRadixCache(MambaRadixCache):
                 self.mamba_lru_list.insert_mru(n)
                 self.mamba_evictable_size_ += len(n.mamba_value)
 
+        # The inserts above put restored nodes at MRU without restamping them.
+        # last_hit_node can be an ancestor of the matched path (the deepest
+        # backed-up node), so its old timestamp is older than descendants it
+        # now sits in front of, and the idle LRU sanity check aborts the
+        # scheduler. Re-touch the path exactly as match_prefix does.
+        self._touch_path_mru(last_hit_node)
+
         self._update_leaf_status(ancestor_node)
 
         self.inc_lock_ref(last_hit_node)
@@ -1007,12 +1014,7 @@ class HiMambaRadixCache(MambaRadixCache):
         self.full_lru_list.reset_node_and_parents_mru(lru_node, self.root_node)
         self.mamba_lru_list.reset_node_and_parents_mru(best_last_node, self.root_node)
 
-        cur_time = get_last_access_time()
-        node_update = best_last_node
-        while node_update:
-            node_update.last_access_time = cur_time
-            cur_time -= 0.00001
-            node_update = node_update.parent
+        self._restamp_path(best_last_node)
 
         if len(value) > best_value_len:
             from sglang.srt.server_args import get_global_server_args
@@ -1073,6 +1075,28 @@ class HiMambaRadixCache(MambaRadixCache):
             host_hit_length=host_hit_length,
             mamba_branching_seqlen=mamba_branching_seqlen,
         )
+
+    @staticmethod
+    def _restamp_path(node: TreeNode) -> None:
+        """Give node and its ancestors fresh access times, child newest.
+
+        The LRU lists are the source of truth; the timestamps mirror their
+        order for the idle sanity check, which rebuilds the order from them.
+        """
+        cur_time = get_last_access_time()
+        while node:
+            node.last_access_time = cur_time
+            cur_time -= 0.00001  # assumes < 100000 nodes on one root path
+            node = node.parent
+
+    def _touch_path_mru(self, node: TreeNode) -> None:
+        """Move node and its ancestors to MRU in both LRU lists and restamp them."""
+        full_node = node
+        while full_node != self.root_node and full_node.evicted:
+            full_node = full_node.parent
+        self.full_lru_list.reset_node_and_parents_mru(full_node, self.root_node)
+        self.mamba_lru_list.reset_node_and_parents_mru(node, self.root_node)
+        self._restamp_path(node)
 
     def _split_node(self, key: RadixKey, child: TreeNode, split_len: int) -> TreeNode:
         if child.evicted:
