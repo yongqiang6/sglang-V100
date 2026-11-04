@@ -37,6 +37,8 @@ class SlotIndexedState(Protocol):
 
     def load_cpu_slots(self, data: Any, indices: torch.Tensor) -> None: ...
 
+    def hicache_slot_tensors(self) -> List[torch.Tensor]: ...
+
 
 class ShortConvPool:
     def __init__(
@@ -129,6 +131,12 @@ class ShortConvPool:
         if self.conv_state is None or data is None:
             return
         self.conv_state[:, indices] = data.to(self.conv_state.device, non_blocking=True)
+
+    def hicache_slot_tensors(self) -> List[torch.Tensor]:
+        """Slot-major (slot on axis 0) device views the HiCache host tier mirrors."""
+        if self.conv_state is None:
+            return []
+        return [self.conv_state[i] for i in range(self.conv_state.shape[0])]
 
 
 class NGramPool:
@@ -227,3 +235,9 @@ class NGramPool:
         self.context[indices.to(dtype=torch.long)] = data.to(
             self.context.device, non_blocking=True
         )
+
+    def hicache_slot_tensors(self) -> List[torch.Tensor]:
+        """Slot-major (slot on axis 0) device views the HiCache host tier mirrors."""
+        if self.context is None:
+            return []
+        return [self.context]

@@ -315,6 +315,11 @@ class HiCacheController:
         self.write_queue: List[CacheOperation] = []
         self.ack_load_queue: List[HiCacheAck] = []
         self.ack_write_queue: List[HiCacheAck] = []
+        # Set by the scheduler to the forward stream; gate load-back H2D and
+        # write D2H behind in-flight forwards (see fence_write_stream,
+        # fence_load_stream).
+        self.load_fence_stream = None
+        self.write_fence_stream = None
 
         self.stop_event = threading.Event()
         self.write_buffer = TransferBuffer(self.stop_event)
@@ -698,6 +703,30 @@ class HiCacheController:
         self.start_writing()
         return host_indices
 
+    def fence_write_stream(self) -> None:
+        """Order the next D2H copy after every forward already queued.
+
+        Under overlap scheduling the previous batch's results are processed
+        (and finished requests cached and written through) while the next
+        forward is in flight. That forward still writes the last token's KV
+        (and, for hybrid models, the tracked state) of a request that just
+        finished, so a copy started before it ends keeps half-written KV on
+        the host, which a later load-back then serves. Later forwards still
+        overlap with the copy.
+        """
+        if self.write_fence_stream is not None:
+            self.write_stream.wait_stream(self.write_fence_stream)
+
+    def fence_load_stream(self) -> None:
+        """Order the next H2D copy after every forward already queued.
+
+        Under overlap scheduling, device pages reclaimed for a load-back may
+        still be written by the in-flight forward; loading into them before it
+        ends corrupts the restored prefix.
+        """
+        if self.load_fence_stream is not None:
+            self.load_stream.wait_stream(self.load_fence_stream)
+
     def start_writing(self) -> None:
         if len(self.write_queue) == 0:
             return
@@ -712,6 +741,7 @@ class HiCacheController:
         finish_event = device_module.Event()
 
         start_event.record()
+        self.fence_write_stream()
         with device_module.stream(self.write_stream):
             start_event.wait(self.write_stream)
             self.mem_pool_host.backup_from_device_all_layer(
@@ -786,6 +816,7 @@ class HiCacheController:
         self.load_queue.clear()
         producer_event = self.layer_done_counter.events[producer_id]
         producer_event.start_event.record()
+        self.fence_load_stream()
 
         with device_module.stream(self.load_stream):
             producer_event.start_event.wait(self.load_stream)

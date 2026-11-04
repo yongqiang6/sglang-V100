@@ -222,17 +222,18 @@ class HiMambaRadixCache(MambaRadixCache):
                 self.mamba_host_lru_list.reset_node_mru(node)
 
         extra_pools = self.mamba_backup_transfers(node)
+        transfer_pools = self._with_kv_sidecar_transfers(extra_pools)
         host_indices = self.cache_controller.write(
             device_indices=node.value,
             node_id=node.id,
-            extra_pools=extra_pools,
+            extra_pools=transfer_pools,
         )
         if host_indices is None:
             self.evict_host(len(node.value))
             host_indices = self.cache_controller.write(
                 device_indices=node.value,
                 node_id=node.id,
-                extra_pools=extra_pools,
+                extra_pools=transfer_pools,
             )
         if host_indices is not None:
             node.host_value = host_indices.clone()
@@ -299,7 +300,7 @@ class HiMambaRadixCache(MambaRadixCache):
         full_device_indices = self.cache_controller.load(
             host_indices=full_host_indices,
             node_id=last_hit_node.id,
-            extra_pools=mamba_pools,
+            extra_pools=self._with_kv_sidecar_transfers(mamba_pools),
         )
         if full_device_indices is None:
             if len(full_host_indices) > 0:
@@ -311,7 +312,7 @@ class HiMambaRadixCache(MambaRadixCache):
             full_device_indices = self.cache_controller.load(
                 host_indices=full_host_indices,
                 node_id=last_hit_node.id,
-                extra_pools=mamba_pools,
+                extra_pools=self._with_kv_sidecar_transfers(mamba_pools),
             )
         self.dec_lock_ref(ancestor_node)
         if full_device_indices is None:
@@ -1980,6 +1981,29 @@ class HiMambaRadixCache(MambaRadixCache):
         if indices is None and error_message is not None:
             raise RuntimeError(error_message)
         return indices
+
+    # -- KV-indexed sidecar transfers (D↔H) ------------------------------------
+
+    def _with_kv_sidecar_transfers(
+        self, transfers: Optional[list[PoolTransfer]]
+    ) -> Optional[list[PoolTransfer]]:
+        """Append transfers for pools whose slots follow the full-KV indices.
+
+        QSA compressed indexer keys (target and MTP draft) are addressed by
+        full-KV slot, so every D↔H move of a KV page must move them too, or a
+        page loaded into a different device slot is read with the previous
+        occupant's keys. The mamba transfers stay first: the mamba commit
+        helpers read ``transfers[0]``.
+        """
+        entry_map = getattr(self.cache_controller.mem_pool_host, "entry_map", {})
+        sidecars = [
+            PoolTransfer(name=name, indices_from_pool=PoolName.KV)
+            for name in (PoolName.INDEXER, PoolName.DRAFT_INDEXER)
+            if name in entry_map
+        ]
+        if not sidecars:
+            return transfers
+        return [*(transfers or []), *sidecars]
 
     # -- mamba PoolTransfer builders (D↔H↔S) ----------------------------------
 

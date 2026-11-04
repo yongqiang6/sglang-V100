@@ -127,6 +127,25 @@ def maybe_register_hicache_draft(
 
     tree_cache.cache_controller.set_draft_kv_pool(pool, draft_host_pool)
 
+    from sglang.srt.mem_cache.hybrid_cache.hybrid_cache_controller import (
+        HybridCacheController,
+    )
+    from sglang.srt.mem_cache.qsa_kv_pool import QSATokenToKVPool
+
+    if isinstance(draft_kv_pool, QSATokenToKVPool) and isinstance(
+        tree_cache.cache_controller, HybridCacheController
+    ):
+        from sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
+            attach_qsa_draft_indexer_pool,
+        )
+
+        if attach_qsa_draft_indexer_pool(
+            tree_cache.cache_controller,
+            draft_kv_pool,
+            allocator_type=server_args.hicache_storage_backend,
+        ):
+            logger.info("HiCache draft QSA indexer keys registered.")
+
 
 def build_kv_cache(
     *,

@@ -19,6 +19,7 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MLATokenToKVPoolHost,
     PoolEntry,
 )
+from sglang.srt.mem_cache.qsa_host_pool import QSAIndexerPoolHost
 from sglang.srt.mem_cache.unified_cache_components import ComponentType
 
 if TYPE_CHECKING:
@@ -510,6 +511,7 @@ def build_hybrid_mamba_stack(
     use_mla: bool,
     host_mamba_evict_fn: Optional[Callable[[int], Any]] = None,
     device_mamba_evict_fn: Optional[Callable[[int], Any]] = None,
+    qsa_pool: Any = None,
     prefetch_threshold: int = 256,
     model_name: Optional[str] = None,
     storage_backend_extra_config: Optional[dict] = None,
@@ -550,6 +552,24 @@ def build_hybrid_mamba_stack(
             device_evict_fn=device_mamba_evict_fn,
         ),
     ]
+    if qsa_pool is not None:
+        # QSA compressed keys are addressed by full-KV slot, so they ride the
+        # KV page indices (sidecar) and use the full-attention layer mapping:
+        # layer i's keys land before layer i's completion event, which the
+        # indexer waits on before reading them.
+        entries.append(
+            build_pool_entry(
+                name=PoolName.INDEXER,
+                host_pool=QSAIndexerPoolHost(
+                    qsa_pool,
+                    kv_host_pool,
+                    allocator_type=server_args.hicache_storage_backend,
+                ),
+                device_pool=qsa_pool,
+                layer_mapping=full_layer_mapping,
+                transfer_layer_num=transfer_layer_num,
+            )
+        )
     host_pool_group = HostPoolGroup(entries)
     cache_controller = HybridCacheController(
         params.token_to_kv_pool_allocator,
@@ -571,6 +591,47 @@ def build_hybrid_mamba_stack(
         enable_storage_metrics=enable_storage_metrics,
     )
     return host_pool_group, cache_controller
+
+
+def attach_qsa_draft_indexer_pool(
+    cache_controller: HybridCacheController,
+    draft_qsa_pool: Any,
+    *,
+    allocator_type: Optional[str],
+) -> bool:
+    """Mirror the MTP draft's QSA compressed keys alongside the target's.
+
+    The draft shares the target's full-KV slot indices, so its compressed keys
+    follow the same KV page indices. Draft layer ``i`` is moved during transfer
+    step ``i``; the draft forward runs after the whole target forward, which
+    has already waited on every layer's completion event.
+    """
+    host_pool_group = cache_controller.mem_pool_host
+    if PoolName.INDEXER not in host_pool_group.entry_map:
+        return False
+    if PoolName.DRAFT_INDEXER in host_pool_group.entry_map:
+        return True
+    draft_host_pool = QSAIndexerPoolHost(
+        draft_qsa_pool,
+        host_pool_group.anchor_entry.host_pool,
+        allocator_type=allocator_type,
+    )
+    transfer_layer_num = cache_controller.layer_num
+    if draft_host_pool.layer_num > transfer_layer_num:
+        raise ValueError(
+            "QSA draft indexer has more layers than the target transfer loop: "
+            f"{draft_host_pool.layer_num} > {transfer_layer_num}"
+        )
+    entry = build_pool_entry(
+        name=PoolName.DRAFT_INDEXER,
+        host_pool=draft_host_pool,
+        device_pool=draft_qsa_pool,
+        layer_mapping={i: i for i in range(draft_host_pool.layer_num)},
+        transfer_layer_num=transfer_layer_num,
+    )
+    host_pool_group.entries.append(entry)
+    host_pool_group.entry_map[entry.name] = entry
+    return True
 
 
 def build_anchor_sidecar_stack(
@@ -1212,10 +1273,21 @@ def attach_hybrid_pool_to_mamba_cache(
     This entrypoint is currently intended only for HiMambaRadixCache.
     """
     try:
+        from sglang.srt.mem_cache.qsa_kv_pool import QSATokenToKVPool
+
         hybrid_kv = mamba_cache.hybrid_kv_cache
         kvcache = mamba_cache.kvcache
         full_layer_mapping = dict(hybrid_kv.full_attention_layer_id_mapping)
         mamba_layer_mapping = dict(params.req_to_token_pool.mamba_map)
+        qsa_pool = hybrid_kv if isinstance(hybrid_kv, QSATokenToKVPool) else None
+        if qsa_pool is not None and server_args.hicache_storage_backend is not None:
+            # Only the host tier carries the QSA compressed keys; an L3 page
+            # restored without them would be read with stale indexer keys.
+            raise ValueError(
+                "HiCache storage backends are not supported for QSA models "
+                "(the compressed indexer keys are not persisted to L3). Use "
+                "host-memory HiCache without --hicache-storage-backend."
+            )
         host_pool_group, cache_controller = build_hybrid_mamba_stack(
             params=params,
             server_args=server_args,
@@ -1232,6 +1304,7 @@ def attach_hybrid_pool_to_mamba_cache(
             use_mla=hybrid_kv.use_mla,
             host_mamba_evict_fn=mamba_cache.evict_mamba_host,
             device_mamba_evict_fn=mamba_cache.evict_mamba,
+            qsa_pool=qsa_pool,
             prefetch_threshold=prefetch_threshold,
             model_name=server_args.served_model_name,
             storage_backend_extra_config=extra_config,
@@ -1249,8 +1322,9 @@ def attach_hybrid_pool_to_mamba_cache(
         )
         hybrid_kv.register_layer_transfer_counter(cache_controller.layer_done_counter)
         logger.info(
-            "Attached hybrid Mamba pool stack to HiMambaRadixCache: pools=KV + MAMBA, "
+            "Attached hybrid Mamba pool stack to HiMambaRadixCache: pools=%s, "
             "transfer_layer_num=%s",
+            "KV + MAMBA + INDEXER" if qsa_pool is not None else "KV + MAMBA",
             mamba_cache.transfer_layer_num,
         )
     except Exception:

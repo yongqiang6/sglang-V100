@@ -493,6 +493,9 @@ class Scheduler(
             page_size=self.page_size,
         )
 
+        # Order HiCache host copies after in-flight forwards.
+        self.maybe_init_hicache_transfer_fences()
+
         # Init running status
         self.init_running_status()
 
@@ -897,6 +900,22 @@ class Scheduler(
                 context_len=self.model_config.context_len,
                 startup_available_gpu_memory_gb=avail_mem,
             )
+
+    def maybe_init_hicache_transfer_fences(self):
+        """Gate HiCache D2H/H2D copies behind forwards already on the forward stream.
+
+        With overlap scheduling, results of batch N (and the write-through of
+        requests that just finished) are processed while batch N+1 is in
+        flight and still writes those requests' last KV slots, and device
+        pages reclaimed for a load-back may still be written by it.
+        """
+        if not self.enable_hierarchical_cache or self.forward_stream is None:
+            return
+        cache_controller = getattr(self.tree_cache, "cache_controller", None)
+        if cache_controller is None:
+            return
+        cache_controller.load_fence_stream = self.forward_stream
+        cache_controller.write_fence_stream = self.forward_stream
 
     def init_running_status(self):
         self.waiting_queue: List[Req] = []

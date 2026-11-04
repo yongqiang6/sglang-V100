@@ -768,10 +768,23 @@ class HybridReqToTokenPool(ReqToTokenPool):
     def get_short_conv_indices(self, req_indices: torch.Tensor) -> torch.Tensor:
         return self.get_mamba_indices(req_indices)
 
+    def _wait_for_slot_side_states(self, layer_id: Optional[int] = None) -> None:
+        """Wait until HiCache has restored the slot side states being read.
+
+        The host tier restores registered side states (short-conv window,
+        n-gram context) during the first Mamba layer's transfer step, so a
+        reader must wait for that step as well as for its own layer.
+        """
+        if self.layer_transfer_counter is None:
+            return
+        threshold = min(self.mamba_map) if self.mamba_map else 0
+        if layer_id is not None:
+            threshold = max(threshold, layer_id)
+        self.layer_transfer_counter.wait_until(threshold - self.start_layer)
+
     def short_conv_layer_cache(self, layer_id: int) -> torch.Tensor:
         assert layer_id in self.short_conv_pool.layer_map
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        self._wait_for_slot_side_states(layer_id)
         return self.short_conv_pool.layer_cache(layer_id)
 
     def short_conv_layer_intermediate_cache(
@@ -783,6 +796,9 @@ class HybridReqToTokenPool(ReqToTokenPool):
         return self.get_mamba_indices(req_indices)
 
     def get_ngram_context(self, ngram_indices: torch.Tensor) -> torch.Tensor:
+        # Read once per forward, before the decoder-layer loop, so it has no
+        # per-layer barrier of its own.
+        self._wait_for_slot_side_states()
         return self.ngram_pool.get_context(ngram_indices)
 
     def set_ngram_context(

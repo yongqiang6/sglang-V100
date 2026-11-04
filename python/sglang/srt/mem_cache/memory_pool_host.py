@@ -1252,6 +1252,10 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
 
 
 class MambaPoolHost(HostKVCache):
+    # Class-level defaults so a model without slot side states, and test stubs
+    # that skip __init__, read an empty pair rather than raising.
+    slot_state_device_tensors: tuple = ()
+    slot_state_buffers: tuple = ()
 
     def __init__(
         self,
@@ -1288,6 +1292,11 @@ class MambaPoolHost(HostKVCache):
         self.conv_dtype = device_pool.mamba_cache.conv[0].dtype
         self.temporal_dtype = device_pool.mamba_cache.temporal.dtype
         self.dtype = self.conv_dtype
+        # Registered side states (Qwen4-Exp PLE n-gram context / short-conv
+        # window) share the checkpoint slot with conv/temporal, so a host round
+        # trip that skips them leaves the previous occupant's rows behind.
+        self.slot_state_device_tensors = self._collect_slot_state_tensors(device_pool)
+        self.slot_state_buffers = []
         self.size_per_token = self.get_size_per_token()
 
         if host_size > 0:
@@ -1376,10 +1385,36 @@ class MambaPoolHost(HostKVCache):
                         allocator=self.allocator,
                     )
                 )
+        # Side states keep their own dtype and slot axis (axis 0 of the
+        # slot-major view the device sibling exposes) in every layout.
+        self.slot_state_buffers = [
+            alloc_func(
+                (self.size,) + tuple(state.shape[1:]),
+                dtype=state.dtype,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
+            )
+            for state in self.slot_state_device_tensors
+        ]
+
+    @staticmethod
+    def _collect_slot_state_tensors(device_pool) -> list:
+        tensors = []
+        for sibling in getattr(device_pool, "_slot_siblings", ()):
+            get_tensors = getattr(sibling, "hicache_slot_tensors", None)
+            if get_tensors is None:
+                raise ValueError(
+                    f"{type(sibling).__name__} is registered on the mamba pool "
+                    "but does not expose hicache_slot_tensors(); HiCache would "
+                    "restore its slots with stale rows."
+                )
+            tensors.extend(get_tensors())
+        return tensors
 
     def get_hybrid_pool_buffer(self):
         # Expose all mamba host tensors that need Mooncake buffer registration.
-        return [self.temporal_buffer, *self.conv_buffer]
+        return [self.temporal_buffer, *self.conv_buffer, *self.slot_state_buffers]
 
     def _iter_page_tensors(self, index: int):
         if self.layout in ["page_first", "page_first_direct"]:
@@ -1390,6 +1425,8 @@ class MambaPoolHost(HostKVCache):
             yield self.temporal_buffer[:, index : index + self.page_size]
             for conv_buf in self.conv_buffer:
                 yield conv_buf[:, index : index + self.page_size]
+        for state_buf in self.slot_state_buffers:
+            yield state_buf[index : index + self.page_size]
 
     @staticmethod
     def _flatten_tensor_bytes(tensor: torch.Tensor) -> torch.Tensor:
@@ -1427,10 +1464,39 @@ class MambaPoolHost(HostKVCache):
             for conv_elem_size in self.conv_state_elem_sizes
         )
         temporal_size = self.temporal_state_elem_size * self.temporal_dtype.itemsize
-        return (conv_total_size + temporal_size) * self.num_mamba_layers
+        # Side-state rows are per slot, not per mamba layer: each entry is
+        # already a single slot-major view, so its row size is added once.
+        side_size = sum(
+            self._item_size_per_index(state) for state in self.slot_state_device_tensors
+        )
+        return (conv_total_size + temporal_size) * self.num_mamba_layers + side_size
 
     def get_ksize_per_token(self):
         return self.get_size_per_token()
+
+    def _transfer_slot_states(
+        self, host_indices, device_indices, io_backend, *, to_device: bool
+    ) -> None:
+        """Move the registered side-state rows of these slots (one direction).
+
+        Runs on the caller's transfer stream like the conv/temporal copies, so
+        the same completion event covers it.
+        """
+        for state, host_buf in zip(
+            self.slot_state_device_tensors, self.slot_state_buffers
+        ):
+            backend = io_backend
+            if backend == "kernel" and self._item_size_per_index(state) % 8 != 0:
+                # The copy kernel moves 8-byte words; fall back to page copies.
+                backend = "direct"
+            if to_device:
+                self._copy_tensor(
+                    host_buf, state, host_indices, device_indices, backend
+                )
+            else:
+                self._copy_tensor(
+                    state, host_buf, device_indices, host_indices, backend
+                )
 
     @staticmethod
     def _item_size_per_index(tensor: torch.Tensor) -> int:
@@ -1553,6 +1619,13 @@ class MambaPoolHost(HostKVCache):
         layer_id,
         io_backend="kernel",
     ):
+        if layer_id == 0 and self.slot_state_device_tensors:
+            # Side state is not per layer, so it rides on the first mamba
+            # layer's step -- before that layer's completion event, which
+            # every reader of a restored slot waits on.
+            self._transfer_slot_states(
+                host_indices, device_indices, io_backend, to_device=True
+            )
         if self.layout in ["page_first", "page_first_direct"]:
             self._copy_tensor_pf_lf(
                 src=self.temporal_buffer,
@@ -1630,6 +1703,10 @@ class MambaPoolHost(HostKVCache):
                         host_indices,
                         io_backend,
                     )
+        if self.slot_state_device_tensors:
+            self._transfer_slot_states(
+                host_indices, device_indices, io_backend, to_device=False
+            )
 
     def get_data_page(self, index, flat: bool = True) -> torch.Tensor:
         data_page = torch.cat(
@@ -1654,11 +1731,23 @@ class MambaPoolHost(HostKVCache):
         data_page: torch.Tensor,
     ) -> None:
         flat_bytes = data_page.contiguous().view(torch.uint8).reshape(-1)
+        expected = self.page_size * self.size_per_token
+        if self.slot_state_device_tensors and flat_bytes.numel() != expected:
+            # A page stored by a build without the side state is shorter; say so
+            # instead of failing inside a reshape halfway through the restore.
+            raise ValueError(
+                f"Mamba state page has {flat_bytes.numel()} bytes, expected "
+                f"{expected}: the page predates registered slot side states."
+            )
         start = 0
         for tensor in self._iter_page_tensors(index):
             num_bytes = tensor.numel() * tensor.element_size()
             tensor_bytes = flat_bytes[start : start + num_bytes]
             start += num_bytes
+            if tensor_bytes.storage_offset() % tensor.element_size():
+                # With side states the page mixes element sizes, so a later
+                # component can start at an offset its dtype cannot view.
+                tensor_bytes = tensor_bytes.clone()
             restored = tensor_bytes.view(dtype=tensor.dtype).reshape(tensor.shape)
             tensor.copy_(restored)
 
@@ -1668,6 +1757,11 @@ class MambaPoolHost(HostKVCache):
         Only page-first layouts are supported for mamba storage zero-copy because
         each page slot in temporal/conv buffers is directly addressable.
         """
+        if self.slot_state_device_tensors:
+            raise NotImplementedError(
+                "Mamba storage zero-copy does not carry registered slot side "
+                "states; use a whole-page storage backend."
+            )
         assert len(indices) % self.page_size == 0
         if self.layout not in ["page_first", "page_first_direct"]:
             raise ValueError(

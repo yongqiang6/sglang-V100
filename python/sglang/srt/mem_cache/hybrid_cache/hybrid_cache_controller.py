@@ -402,6 +402,7 @@ class HybridCacheController(BaseHiCacheController):
         start_event = device_module.Event()
         finish_event = device_module.Event()
         start_event.record()
+        self.fence_write_stream()
         with device_module.stream(self.write_stream):
             start_event.wait(self.write_stream)
             self.mem_pool_host.backup_from_device_all_layer(
@@ -411,6 +412,13 @@ class HybridCacheController(BaseHiCacheController):
                 self.io_backend,
                 pool_transfers=resolved_pool_transfers,
             )
+            if self.has_draft and host_indices.numel() > 0:
+                self.mem_pool_host_draft.backup_from_device_all_layer(
+                    self.mem_pool_device_draft,
+                    host_indices,
+                    device_indices,
+                    self.io_backend,
+                )
             finish_event.record()
             self._record_transfer_indices_on_stream(
                 self.write_stream,
@@ -474,6 +482,7 @@ class HybridCacheController(BaseHiCacheController):
         self.load_queue.clear()
         producer_event = self.layer_done_counter.events[producer_id]
         producer_event.start_event.record()
+        self.fence_load_stream()
         with device_module.stream(self.load_stream):
             producer_event.start_event.wait(self.load_stream)
             for i in range(self.layer_num):
@@ -485,6 +494,18 @@ class HybridCacheController(BaseHiCacheController):
                     self.io_backend,
                     pool_transfers=resolved_pool_transfers,
                 )
+                if (
+                    self.has_draft
+                    and host_indices.numel() > 0
+                    and i < self.mem_pool_host_draft.layer_num
+                ):
+                    self.mem_pool_host_draft.load_to_device_per_layer(
+                        self.mem_pool_device_draft,
+                        host_indices,
+                        device_indices,
+                        i,
+                        self.io_backend,
+                    )
                 producer_event.complete(i)
             self._record_transfer_indices_on_stream(
                 self.load_stream,
