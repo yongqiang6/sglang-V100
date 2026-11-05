@@ -62,6 +62,39 @@ def check_torch() -> None:
     _check("torch ships sm_70 kernels", "sm_70" in arch_list, " ".join(arch_list))
 
 
+# CUDA 13 runtime libraries a PyPI torch-extension wheel links instead of the
+# cu126 install's CUDA 12 ones (torchaudio 2.11.0 and torchcodec 0.17.0 do).
+_CUDA13_LIBRARY = re.compile(
+    r"lib(cudart|nvrtc|cublas|cublasLt|cufft|curand|cusparse|nvjpeg|nvJitLink)\.so\.13"
+)
+
+
+def check_torch_extensions() -> None:
+    for name in ("torchvision", "torchaudio", "torchcodec"):
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            continue
+        libraries = [
+            dist.locate_file(f)
+            for f in dist.files or ()
+            if f.name.endswith(".so") or ".so." in f.name
+        ]
+        cuda13 = set()
+        for library in libraries:
+            linked = subprocess.run(
+                ["ldd", str(library)], capture_output=True, text=True
+            ).stdout
+            cuda13.update(m.group(0) for m in _CUDA13_LIBRARY.finditer(linked))
+        _check(
+            f"{name} is a CUDA 12 build (torch cu126 index)",
+            not cuda13,
+            f"{dist.version} links {' '.join(sorted(cuda13))}"
+            if cuda13
+            else dist.version,
+        )
+
+
 def check_nvcc() -> None:
     cuda_home = os.environ.get("CUDA_HOME")
     nvcc = str(Path(cuda_home) / "bin" / "nvcc") if cuda_home else shutil.which("nvcc")
@@ -253,6 +286,7 @@ def main() -> int:
     args = parser.parse_args()
 
     check_torch()
+    check_torch_extensions()
     check_nvcc()
     check_cuda_runtime_consistency()
     check_flashinfer()

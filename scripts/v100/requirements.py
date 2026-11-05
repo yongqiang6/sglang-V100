@@ -6,9 +6,12 @@ binaries, and rewrites requirements that would pull CUDA 13 runtime wheels.
 
 Usage:
     python scripts/v100/requirements.py [--extra diffusion] > requirements-v100.txt
+    python scripts/v100/requirements.py --torch-index        # pins for the cu126 index
+    python scripts/v100/requirements.py --torch-constraints  # installed torch family
 """
 
 import argparse
+import importlib.metadata as metadata
 import sys
 import tomllib
 from pathlib import Path
@@ -19,10 +22,14 @@ from packaging.utils import canonicalize_name
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = REPO_ROOT / "python" / "pyproject.toml"
 
+# Installed from the torch CUDA index (download.pytorch.org/whl/cu126) together
+# with torch. Their PyPI wheels are CUDA 13 builds: torch has no sm_70 kernels,
+# and torchaudio/torchcodec link libcudart.so.13, which a cu126 install lacks.
+TORCH_INDEX_PACKAGES = ("torch", "torchvision", "torchaudio", "torchcodec")
+
 # Installed separately by install_v100.sh / v100.Dockerfile.
 REPLACED_BY_V100_INSTALL = {
-    "torch",  # cu126 wheel from download.pytorch.org (the PyPI wheel is cu130, no sm_70)
-    "torchvision",
+    *TORCH_INDEX_PACKAGES,
     "flashinfer-python",  # source checkout + patches/v100/flashinfer-0.7.2-sm70.patch
     "sglang-kernel",  # source build with -DSGL_KERNEL_V100_ONLY=ON
 }
@@ -94,8 +101,44 @@ def build_requirements(extras: list[str]) -> list[str]:
     return lines
 
 
+def torch_index_requirements() -> list[str]:
+    """pyproject pins of TORCH_INDEX_PACKAGES that apply to this platform."""
+    pins = {}
+    for line in tomllib.loads(PYPROJECT.read_text())["project"]["dependencies"]:
+        requirement = Requirement(line)
+        name = canonicalize_name(requirement.name)
+        if name in TORCH_INDEX_PACKAGES and (
+            requirement.marker is None or requirement.marker.evaluate()
+        ):
+            requirement.marker = None
+            pins[name] = str(requirement)
+    return [pins[name] for name in TORCH_INDEX_PACKAGES if name in pins]
+
+
+def torch_index_constraints() -> list[str]:
+    """Installed versions of TORCH_INDEX_PACKAGES, so other installs keep them."""
+    lines = []
+    for name in TORCH_INDEX_PACKAGES:
+        try:
+            lines.append(f"{name}=={metadata.version(name)}")
+        except metadata.PackageNotFoundError:
+            pass
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--torch-index",
+        action="store_true",
+        help="Print the torch-family pins to install from the torch CUDA index.",
+    )
+    mode.add_argument(
+        "--torch-constraints",
+        action="store_true",
+        help="Print the installed torch-family versions as pip constraints.",
+    )
     parser.add_argument(
         "--extra",
         action="append",
@@ -103,7 +146,13 @@ def main() -> int:
         help="Also include an optional-dependencies group (repeatable).",
     )
     args = parser.parse_args()
-    sys.stdout.write("\n".join(build_requirements(args.extra)) + "\n")
+    if args.torch_index:
+        lines = torch_index_requirements()
+    elif args.torch_constraints:
+        lines = torch_index_constraints()
+    else:
+        lines = build_requirements(args.extra)
+    sys.stdout.write("\n".join(lines) + "\n")
     return 0
 
 

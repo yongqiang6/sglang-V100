@@ -72,9 +72,13 @@ python scripts/v100/check_v100_env.py
 `scripts/v100/requirements.py` derives the dependency list from
 `python/pyproject.toml`, so upstream pin bumps flow through automatically:
 
-- Installed separately: `torch`/`torchvision` (cu126 index), `flashinfer-python`
-  (v0.7.2 source + `patches/v100/flashinfer-0.7.2-sm70.patch`),
-  `sglang-kernel` (source build with `-DSGL_KERNEL_V100_ONLY=ON`).
+- Installed separately: `torch`, `torchvision`, `torchaudio` and `torchcodec`
+  from the cu126 index at their pyproject pins (`requirements.py --torch-index`),
+  `flashinfer-python` (v0.7.2 source + `patches/v100/flashinfer-0.7.2-sm70.patch`)
+  and `sglang-kernel` (source build with `-DSGL_KERNEL_V100_ONLY=ON`). The PyPI
+  `torchaudio` 2.11.0 and `torchcodec` 0.17.0 wheels link `libcudart.so.13` (and
+  `libnvrtc.so.13`), which a cu126 install does not have; `check_v100_env.py`
+  fails on any torch extension package that links a CUDA 13 library.
 - Dropped (CUDA 13 or SM80+ only, imported lazily by SGLang): `flash-attn-4`,
   `humming-kernels`, `nvshmem4py-cu13`, `sgl-deep-ep`, `sgl-deep-gemm`, `sgl-flash-mla`.
 - Rewritten: `cuda-python>=12.6,<13`, and every `[cu13]` extra is removed, so no

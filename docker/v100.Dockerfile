@@ -41,10 +41,10 @@ COPY python/pyproject.toml /opt/sglang/python/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python -m pip install --upgrade pip setuptools wheel setuptools-scm \
       setuptools-rust scikit-build-core "cmake>=3.31,<4" ninja packaging \
-    && TORCH_VERSION="$(python -c 'import tomllib; deps = tomllib.load(open("/opt/sglang/python/pyproject.toml", "rb"))["project"]["dependencies"]; print(next(d.split("==")[1] for d in deps if d.replace(" ", "").startswith("torch==")))')" \
-    && python -m pip install "torch==${TORCH_VERSION}" torchvision --index-url "${TORCH_INDEX_URL}" \
+    && python -m pip install $(python /opt/sglang/scripts/v100/requirements.py --torch-index) \
+       --index-url "${TORCH_INDEX_URL}" \
     && python /opt/sglang/scripts/v100/requirements.py >/tmp/requirements-v100.txt \
-    && python -c 'import torch; print(f"torch=={torch.__version__}")' >/tmp/constraints-v100.txt \
+    && python /opt/sglang/scripts/v100/requirements.py --torch-constraints >/tmp/constraints-v100.txt \
     && python -m pip install -r /tmp/requirements-v100.txt -c /tmp/constraints-v100.txt
 
 COPY patches/v100/flashinfer-0.7.2-sm70.patch /opt/sglang/patches/v100/

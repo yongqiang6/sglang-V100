@@ -68,14 +68,9 @@ log "Build parallelism: MAX_JOBS=$MAX_JOBS"
 python -m pip install --upgrade pip setuptools wheel setuptools-scm setuptools-rust \
   scikit-build-core "cmake>=3.31,<4" ninja packaging
 
-TORCH_VERSION="$(python - "$REPO_ROOT/python/pyproject.toml" <<'PY'
-import sys, tomllib
-deps = tomllib.load(open(sys.argv[1], "rb"))["project"]["dependencies"]
-print(next(d.split("==")[1] for d in deps if d.replace(" ", "").startswith("torch==")))
-PY
-)"
-log "Installing torch==$TORCH_VERSION (cu126)"
-python -m pip install "torch==$TORCH_VERSION" torchvision --index-url "$TORCH_INDEX_URL"
+mapfile -t TORCH_PACKAGES < <(python "$REPO_ROOT/scripts/v100/requirements.py" --torch-index)
+log "Installing ${TORCH_PACKAGES[*]} (cu126)"
+python -m pip install "${TORCH_PACKAGES[@]}" --index-url "$TORCH_INDEX_URL"
 
 log "Installing SGLang dependencies with V100 overrides"
 mkdir -p "$DEPS_ROOT"
@@ -84,7 +79,8 @@ EXTRA_ARGS=()
 for extra in ${SGLANG_V100_EXTRAS:-}; do EXTRA_ARGS+=(--extra "$extra"); done
 python "$REPO_ROOT/scripts/v100/requirements.py" "${EXTRA_ARGS[@]}" \
   >"$DEPS_ROOT/requirements-v100.txt"
-python -c 'import torch; print(f"torch=={torch.__version__}")' >"$DEPS_ROOT/constraints-v100.txt"
+python "$REPO_ROOT/scripts/v100/requirements.py" --torch-constraints \
+  >"$DEPS_ROOT/constraints-v100.txt"
 python -m pip install -r "$DEPS_ROOT/requirements-v100.txt" -c "$DEPS_ROOT/constraints-v100.txt"
 python -m pip install --no-deps --no-build-isolation -e "$REPO_ROOT/python"
 
