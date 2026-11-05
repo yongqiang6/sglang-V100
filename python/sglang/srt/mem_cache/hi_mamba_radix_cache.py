@@ -372,11 +372,48 @@ class HiMambaRadixCache(MambaRadixCache):
                 last_node.evicted or last_node.mamba_evicted
             ):
                 last_node = last_node.parent
+            self._fall_back_req_prefix(req, last_node)
 
         return (
             torch.empty((0,), dtype=torch.int64, device=self.device),
             last_node,
         )
+
+    def _fall_back_req_prefix(self, req, node: TreeNode) -> None:
+        """Shrink a request's matched prefix to ``node`` after a failed load-back.
+
+        match_prefix hands the request the device KV down to the matched node,
+        which may sit below ``node`` when its mamba state was expected from
+        host. The caller keeps ``req.prefix_indices`` and locks only ``node``,
+        so the prefix must end at ``node`` and the request's mamba state must
+        start from ``node``'s, or it would use unlocked KV and a state that
+        does not match its prefix.
+        """
+        if req is None:
+            return
+        depth = 0
+        cur = node
+        while cur is not self.root_node:
+            depth += len(cur.value)
+            cur = cur.parent
+        if len(req.prefix_indices) > depth:
+            req.prefix_indices = req.prefix_indices[:depth]
+        if node is self.root_node or node.mamba_value is None:
+            # Empty prefix: start from a cleared state.
+            req.mamba_cow_src_index = None
+            if req.mamba_pool_idx is not None:
+                req.mamba_needs_clear = True
+            return
+        if req.mamba_pool_idx is None:
+            req.mamba_pool_idx = self._alloc_with_evict(
+                self.req_to_token_pool.mamba_pool,
+                1,
+                self.evict_mamba,
+                lock_node=node,
+                error_message="Can not alloc mamba cache",
+            )[0]
+        req.mamba_cow_src_index = node.mamba_value
+        req.mamba_needs_clear = False
 
     def _inc_hit_count(self, node: TreeNode, chunked=False):
         if self.cache_controller.write_policy == "write_back" or chunked:
@@ -1041,8 +1078,15 @@ class HiMambaRadixCache(MambaRadixCache):
         while last_host_node is not self.root_node and not last_host_node.backuped:
             last_host_node = last_host_node.parent
 
+        # Load back to best_last_node itself, never to a shallower ancestor.
+        # last_host_node is the deepest *backed-up* node, which is an ancestor
+        # when best_last_node is not on host yet (e.g. a chunked-prefill node).
+        # Restoring that ancestor's mamba state would pair an older recurrent
+        # state with the KV prefix up to best_last_node, and init_load_back
+        # would then lock only the ancestor's path while the request keeps
+        # using the unlocked KV below it, which can be evicted and reused.
         mamba_host_hit = (
-            1 if (last_host_node.mamba_evicted and last_host_node.mamba_backuped) else 0
+            1 if (best_last_node.mamba_evicted and best_last_node.mamba_backuped) else 0
         )
         host_hit_length = max(kv_host_hit_length, mamba_host_hit)
 
@@ -1070,8 +1114,7 @@ class HiMambaRadixCache(MambaRadixCache):
             device_indices=value,
             last_device_node=last_device_node,
             last_host_node=last_host_node,
-            # TODO(ispobock): use best_match_node as start node for load_back
-            best_match_node=last_host_node,
+            best_match_node=best_last_node,
             host_hit_length=host_hit_length,
             mamba_branching_seqlen=mamba_branching_seqlen,
         )
