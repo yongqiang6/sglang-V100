@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.qsa import sm70 as qsa_sm70
 from sglang.srt.layers.attention.qsa.config import (
     is_qwen_qsa,
     parse_qsa_profile,
@@ -274,6 +275,7 @@ class QwenSparseAttnBackend(AttentionBackend):
         # (layer_id, k_full, v_full) of the prefill-CP K/V gather prefetch_cp_kv
         # started; that layer's _forward_extend_cp joins it.
         self._cp_kv_pending: Optional[Tuple[int, torch.Tensor, torch.Tensor]] = None
+        self._sm70_dense_decode: Optional[qsa_sm70.DenseDecode] = None
 
     @staticmethod
     def _is_speculative_paged_mode(forward_mode) -> bool:
@@ -1524,6 +1526,15 @@ class QwenSparseAttnBackend(AttentionBackend):
             (1, 0),
         ).contiguous()
         if not any(prefix_lens):
+            if qsa_sm70.use_dense_prefill(forward_batch, q.device, layer.head_dim):
+                output = qsa_sm70.dense_prefill(
+                    q,
+                    k[:num_valid_rows],
+                    v[:num_valid_rows],
+                    extend_lens,
+                    layer.scaling,
+                )
+                return self._pad_extend_output(output, num_output_rows)
             output = sparse_gqa_fwd_interface_triton(
                 q.contiguous(),
                 k[:num_valid_rows].contiguous(),
@@ -1537,13 +1548,28 @@ class QwenSparseAttnBackend(AttentionBackend):
 
         # Current-chunk K/V has already been committed to the cache above.
         pool = self.token_to_kv_pool
+        k_buffer = pool.layer_router.read(layer.layer_id).key()
+        v_buffer = pool.layer_router.read(layer.layer_id).value()
+        if qsa_sm70.can_use_cache_prefill(
+            q, k_buffer, v_buffer, forward_batch, topk_indices
+        ):
+            output = qsa_sm70.cache_prefill(
+                q,
+                k_buffer,
+                v_buffer,
+                self.req_to_token_pool.req_to_token,
+                forward_batch,
+                topk_indices,
+                layer.scaling,
+            )
+            return self._pad_extend_output(output, num_output_rows)
         sequence_lens_tensor = torch.tensor(
             sequence_lens, dtype=torch.int32, device=q.device
         )
         cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
         packed_k, packed_v = pack_qsa_prefill_kv(
-            k=pool.layer_router.read(layer.layer_id).key(),
-            v=pool.layer_router.read(layer.layer_id).value(),
+            k=k_buffer,
+            v=v_buffer,
             req_to_token=self.req_to_token_pool.req_to_token,
             req_indices=forward_batch.req_pool_indices,
             cu_k=cu_seqlens_k,
@@ -1945,8 +1971,26 @@ class QwenSparseAttnBackend(AttentionBackend):
                 trtllm_decode,
             )
 
-        batch, topk = topk_indices.shape
         sequence_lens = metadata.sequence_lengths
+        req_pool_indices = (
+            metadata.row_req_pool_indices
+            if metadata.row_req_pool_indices is not None
+            else forward_batch.req_pool_indices
+        )
+        sm70_output = self._forward_sm70_paged(
+            q,
+            k_buffer,
+            v_buffer,
+            layer,
+            forward_batch,
+            topk_indices,
+            sequence_lens,
+            req_pool_indices,
+        )
+        if sm70_output is not None:
+            return sm70_output
+
+        batch, topk = topk_indices.shape
         if metadata.is_cuda_graph:
             valid_counts = metadata.fa2_valid_counts
             cu_seqlens_k = metadata.fa2_cu_seqlens_k
@@ -1981,11 +2025,7 @@ class QwenSparseAttnBackend(AttentionBackend):
             k_buffer,
             v_buffer,
             self.req_to_token_pool.req_to_token,
-            (
-                metadata.row_req_pool_indices
-                if metadata.row_req_pool_indices is not None
-                else forward_batch.req_pool_indices
-            ),
+            req_pool_indices,
             topk_indices,
             sequence_lens,
             cu_seqlens_k,
@@ -1994,7 +2034,8 @@ class QwenSparseAttnBackend(AttentionBackend):
             batch,
             topk,
         )
-        if is_hip():
+        # ROCm and SM70 have no FlashAttention varlen kernel for this shape.
+        if is_hip() or qsa_sm70.is_sm70(q.device):
             relative_indices = torch.arange(
                 topk, dtype=torch.int32, device=q.device
             ).expand(batch, -1)
@@ -2026,6 +2067,62 @@ class QwenSparseAttnBackend(AttentionBackend):
             causal=True,
         )
         return output.reshape(q.shape[0], -1)
+
+    def _forward_sm70_paged(
+        self,
+        q,
+        k_buffer,
+        v_buffer,
+        layer,
+        forward_batch,
+        topk_indices,
+        sequence_lens,
+        req_pool_indices,
+    ) -> Optional[torch.Tensor]:
+        """The SM70 dense and direct-cache decode routes; None elsewhere."""
+        forward_mode = forward_batch.forward_mode
+        page_size = self.token_to_kv_pool.page_size
+        if q.shape[0] == sequence_lens.numel() and qsa_sm70.can_use_dense_decode(
+            q,
+            k_buffer,
+            v_buffer,
+            is_decode=forward_mode.is_decode(),
+            max_context_len=self.max_context_len,
+            page_size=page_size,
+        ):
+            if self._sm70_dense_decode is None:
+                self._sm70_dense_decode = qsa_sm70.DenseDecode(
+                    self.max_context_len, page_size, q.device
+                )
+            return self._sm70_dense_decode(
+                q,
+                k_buffer,
+                v_buffer,
+                self.req_to_token,
+                req_pool_indices,
+                sequence_lens,
+                layer,
+            )
+        if qsa_sm70.can_use_cache_decode(
+            q,
+            k_buffer,
+            v_buffer,
+            topk_indices,
+            sequence_lens.numel(),
+            forward_mode.is_decode() or self._is_speculative_paged_mode(forward_mode),
+        ):
+            output = qsa_sm70.cache_decode(
+                q,
+                k_buffer,
+                v_buffer,
+                self.req_to_token_pool.req_to_token,
+                req_pool_indices,
+                topk_indices,
+                sequence_lens,
+                layer.scaling,
+            )
+            return output.reshape(q.shape[0], -1)
+        return None
 
 
 class QwenSparseMultiStepDraftBackend:

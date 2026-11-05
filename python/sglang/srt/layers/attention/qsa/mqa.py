@@ -25,6 +25,24 @@ except ImportError:
     HAS_TILELANG = False
 
 
+@functools.lru_cache(maxsize=None)
+def _is_sm70_index(index: int) -> bool:
+    return torch.cuda.get_device_capability(index) == (7, 0)
+
+
+def is_sm70(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return _is_sm70_index(index)
+
+
+def sm70_exact_indexer_decode(heads: int, head_dim: int) -> bool:
+    """The SM70 CUDA scorer's shape (Qwen3.8 Flash Next TP4): it reads the real
+    heads directly, so the indexer must not pad them for the TileLang MMA."""
+    return (heads, head_dim) == (4, 128)
+
+
 def _validate_q(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError(f"QSA requires q [tokens, heads, head_dim], got {q.shape}")
@@ -112,6 +130,7 @@ def torch_qsa_mqa_decode(
 # TileLang dtype names of the scoring-kernel operands. The logits stay fp32.
 _TILELANG_DTYPES = {
     torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
     torch.float8_e4m3fn: "float8_e4m3fn",
 }
 
@@ -125,6 +144,9 @@ def _scoring_dtype(q: torch.Tensor, k: torch.Tensor) -> torch.dtype:
                 f"got q={q.dtype} k={k.dtype}"
             )
         return torch.float8_e4m3fn
+    # Volta's MMA takes FP16 operands only; the SM70 indexer cache is FP16.
+    if is_sm70(q.device):
+        return torch.float16
     return torch.bfloat16
 
 
@@ -575,10 +597,14 @@ def tilelang_qsa_mqa_decode(
         raise RuntimeError("TileLang is unavailable")
     _validate_decode_inputs(q, k_cache, page_table, context_lens)
     page_size = int(k_cache.shape[1])
-    if page_size < 8 or 64 % page_size != 0:
+    # SM70 serves QSA with 16-token pages, so a ratio-4 compressed page is 4 rows;
+    # the fork validated packing those as 16 sub-pages of the 64-row GEMM tile.
+    min_page_size = 4 if is_sm70(q.device) else 8
+    if page_size < min_page_size or 64 % page_size != 0:
         raise ValueError(
             "TileLang QSA decode requires a compressed page size of "
-            f"8/16/32/64 (64-row GEMM sub-page packing), got {page_size}"
+            f"{min_page_size}..64 dividing 64 (64-row GEMM sub-page packing), "
+            f"got {page_size}"
         )
     if min_scored_len > 0:
         logits = torch.empty(
@@ -593,10 +619,10 @@ def tilelang_qsa_mqa_decode(
         )
     if not q.shape[0] or not max_model_len:
         return logits
-    # CUDA MMA accepts an eight-wide N dimension, while ROCm MFMA requires
-    # sixteen. Zero-padding preserves the weight-free head sum on both paths.
+    # CUDA MMA accepts an eight-wide N dimension, while ROCm MFMA and the Volta
+    # MMA path require sixteen. Zero-padding preserves the weight-free head sum.
     query_heads, head_dim = q.shape[1:]
-    head_alignment = 16 if is_hip() else 8
+    head_alignment = 16 if is_hip() or is_sm70(q.device) else 8
     kernel_heads = max(
         head_alignment,
         ((query_heads + head_alignment - 1) // head_alignment) * head_alignment,
@@ -669,6 +695,27 @@ def qsa_mqa_decode(
     *,
     min_scored_len: int = 0,
 ) -> torch.Tensor:
+    if (
+        q.is_cuda
+        and is_sm70(q.device)
+        and q.dtype == torch.float16
+        and k_cache.dtype == torch.float16
+        and sm70_exact_indexer_decode(q.shape[1], q.shape[2])
+        and tuple(k_cache.shape[1:]) == (4, 1, 128)
+    ):
+        from sglang.kernels.ops.attention.tilelang_fa_v100._decode_cuda import (
+            sm70_cuda_qsa_indexer_decode,
+        )
+
+        return sm70_cuda_qsa_indexer_decode(
+            q,
+            k_cache,
+            page_table,
+            context_lens,
+            max_model_len,
+            float(score_scale or math.sqrt(q.shape[2])),
+            fill_unscored=min_scored_len == 0,
+        )
     if q.is_cuda and HAS_TILELANG:
         return tilelang_qsa_mqa_decode(
             q,

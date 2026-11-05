@@ -61,6 +61,54 @@ The NVFP4 checkpoint fits a single 96 GB RTX PRO 6000 Blackwell (SM120) only wit
 
 </Accordion>
 
+<a id="v100-note" />
+
+<Accordion title="V100 notes (4x 32 GB, TP=4)">
+
+V100 (SM70) needs the V100 environment (`docs/v100/README.md`, which builds the
+SM70 kernel libraries): it has no BF16, FlashAttention or FP8 compute, so the
+model runs in FP16 there, QSA attention takes the SM70 routes and the N-gram
+table (47.7 GiB in FP8) is offloaded to pinned host memory, split across the
+TP ranks, so the host needs that much free RAM on top of the page cache. Docker
+also needs `--ulimit memlock=-1`. Pages are 16 tokens and the KV cache is E5M2,
+which the SM70 QSA kernels read directly. This is the sglang-V100 fork's
+validated single-request, full-context MTP profile (108-119 tok/s decode there)
+in current flags. On the current code it has passed unit tests and `sm_70`
+compile checks only, so it has not been rerun on a V100, and the fork's
+decode fusions are not ported yet.
+
+```bash 4×V100 32GB
+NCCL_P2P_LEVEL=NVL \
+sglang serve \
+  --model-path RadixArk/Qwen3.8-Flash-Next-NVFP4 \
+  --tp-size 4 \
+  --kv-cache-dtype fp8_e5m2 \
+  --linear-attn-prefill-backend tilelang \
+  --linear-attn-decode-backend triton \
+  --mem-fraction-static 0.80 \
+  --context-length 262144 \
+  --max-running-requests 1 \
+  --chunked-prefill-size 8192 \
+  --mamba-radix-cache-strategy extra_buffer \
+  --mamba-full-memory-ratio 0.2 \
+  --speculative-algorithm NEXTN \
+  --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4 \
+  --reasoning-parser auto \
+  --tool-call-parser auto \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+- **Dense prefill.** Prompts without a cached prefix up to 8,192 tokens run
+  dense attention, which the fork measured about 8x faster than the sparse
+  gather per layer on V100. `SGLANG_SM70_QSA_DENSE_PREFILL_MAX_TOKENS` sets the
+  limit, and `0` keeps every prefill sparse.
+- **Target only.** Drop the four `--speculative-*` flags.
+
+</Accordion>
+
 ## Playground
 
 The Playground is where you experiment with **SGLang features beyond the verified matrix**. The Deploy panel above only emits combinations the SGLang team has signed off on; the Playground lets you turn on additional knobs on top of whichever cell the Deploy panel is currently showing.

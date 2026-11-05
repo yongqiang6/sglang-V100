@@ -19,9 +19,11 @@ from sglang.srt.layers.attention.qsa.metadata import (
 )
 from sglang.srt.layers.attention.qsa.mqa import (
     HAS_TILELANG,
+    is_sm70,
     qsa_mqa_decode,
     qsa_mqa_prefill,
     qsa_mqa_prefill_relative,
+    sm70_exact_indexer_decode,
 )
 from sglang.srt.layers.cp.utils import (
     ContextParallelStrategyKind,
@@ -679,6 +681,17 @@ class QSAIndexer(MultiPlatformOp):
             ),
         )
 
+    def _decode_query_heads(self, device: torch.device) -> int:
+        # The TileLang decode MQA needs query heads in multiples of 8 (16 on SM70);
+        # the SM70 CUDA scorer reads its exact shape unpadded.
+        if is_sm70(device):
+            if sm70_exact_indexer_decode(self.index_n_heads, self.index_head_dim):
+                return self.index_n_heads
+            alignment = 16
+        else:
+            alignment = 8
+        return (self.index_n_heads + alignment - 1) // alignment * alignment
+
     def _forward_impl(
         self,
         hidden_states: torch.Tensor,
@@ -686,6 +699,7 @@ class QSAIndexer(MultiPlatformOp):
         forward_batch,
         indexer_metadata,
         cp_global_rope_positions: torch.Tensor | None = None,
+        skip_prefill_selection: bool = False,
     ) -> torch.Tensor:
         """Portable orchestration shared by different platforms.
         Fast paths are gated per platforms inside kernel calls.
@@ -693,6 +707,8 @@ class QSAIndexer(MultiPlatformOp):
         forward_mode = forward_batch.forward_mode
         is_target_verify = getattr(forward_mode, "is_target_verify", lambda: False)()
         is_draft_extend = getattr(forward_mode, "is_draft_extend_v2", lambda: False)()
+        if skip_prefill_selection and not forward_mode.is_extend_without_speculative():
+            raise ValueError("QSA selection can only be skipped for ordinary prefill")
         if cp_global_rope_positions is not None and not (
             forward_mode.is_decode() or is_target_verify or is_draft_extend
         ):
@@ -758,8 +774,7 @@ class QSAIndexer(MultiPlatformOp):
             pool=indexer_metadata.token_to_kv_pool,
             cache_loc=state_slots,
             q_heads_padded=(
-                # The tilelang decode MQA kernel needs query heads in multiples of 8.
-                ((self.index_n_heads + 7) // 8) * 8
+                self._decode_query_heads(hidden_states.device)
                 if (forward_mode.is_decode() or is_target_verify or is_draft_extend)
                 else None
             ),
@@ -787,6 +802,13 @@ class QSAIndexer(MultiPlatformOp):
                 defer_expansion=q.is_cuda and indexer_metadata.defer_block_expansion,
             )
 
+        if skip_prefill_selection:
+            # Dense SM70 prefill reads every key. The compressed keys written above
+            # still serve later sparse decode and prefix reuse; a zero-width
+            # selection carries the semantic row count to the backend.
+            return torch.empty(
+                (num_valid_tokens, 0), dtype=torch.int32, device=hidden_states.device
+            )
         compressed_keys, row_starts, row_ends, sequence_lengths = (
             indexer_metadata.get_prefill_mqa_inputs(self.layer_id, logical_positions)
         )
@@ -813,6 +835,7 @@ class QSAIndexer(MultiPlatformOp):
         forward_batch,
         indexer_metadata,
         cp_global_rope_positions: torch.Tensor | None = None,
+        skip_prefill_selection: bool = False,
     ) -> torch.Tensor:
         return self._forward_impl(
             hidden_states,
@@ -820,6 +843,7 @@ class QSAIndexer(MultiPlatformOp):
             forward_batch,
             indexer_metadata,
             cp_global_rope_positions,
+            skip_prefill_selection,
         )
 
     def forward_xpu(

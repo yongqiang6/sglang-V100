@@ -13,7 +13,7 @@ what still needs a V100 to validate.
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ/FP8; TurboMind FP16 MoE, block-FP8 W8A16 and AWQ W4A16; QPN8 FP8 decode | Done |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Done (TileLang native verify not ported) |
-| 7 | NVFP4, PCIe custom all-reduce, MiniMax-H3 on V100 | Done (Qwen3.8 SM70 fusions not ported) |
+| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (Qwen3.8 SM70 decode fusions not ported) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -331,11 +331,49 @@ step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
     `--quantization-ignored-layers` and saturate FP16 overflow. The deployment
     command is in the MiniMax-H3 cookbook page.
 
-Not ported: the fork's Qwen3.8 NVFP4 decode kernel and per-shape Marlin
-geometry selection (`sm70_nvfp4_moe_decode`), its SM70 Qwen fusions
-(`sm70_qwen_fusions`, HC mix/gate, dense GEMV) and its PLE offload changes.
+### Qwen3.8 Flash Next on SM70
+
+Its full-attention layers use QSA sparse attention, which upstream serves with
+FlashAttention (FA2 is SM80+, FA4 is Hopper/Blackwell) and FP8 indexer
+GEMMs, none of which run on Volta. The fork's SM70 routes are ported onto
+upstream's QSA code; the routing lives in
+`layers/attention/qsa/sm70.py`:
+
+- Prefix-free prefills up to `SGLANG_SM70_QSA_DENSE_PREFILL_MAX_TOKENS`
+  (8192) tokens run dense causal attention with the TileLang D256 kernel; the
+  indexer still compresses keys but skips the selection. The fork measured the
+  sparse Triton gather at 29.5 ms per layer against 3.55 ms dense (4K tokens,
+  TP4). Longer prefills stay sparse (Triton).
+- When `--context-length` fits that threshold, decode reads the paged E5M2
+  cache densely (TileLang grouped decode).
+- Otherwise prefill with a cached prefix (one request), decode and MTP verify,
+  at the exact TP4 shape (6 query heads, 1 KV head, head dim 256) with an E5M2
+  cache, read the selected keys from the cache with the fork's CUDA kernels.
+- Any other decode runs upstream's Triton packed-decode kernel instead of
+  FlashAttention, as on ROCm.
+- The indexer runs FP16 (Volta's MMA is FP16-only): `--qsa-indexer-dtype auto`
+  resolves to float16 and the other values raise. Decode pads index heads to
+  16, except at the TP4 shape (4 heads, dim 128), where the fork's CUDA scorer
+  reads them unpadded.
+- Pages are 16 tokens (64 elsewhere), so a ratio-4 compressed page is 4 rows,
+  which the TileLang scorer now accepts on SM70.
+- PLE: the N-gram table is offloaded to host memory by default even at FP16
+  (it does not fit a 32 GB V100 next to the weights), and the host gather
+  decodes its FP8 bytes as Triton's software `fp8e4b15` times 256, which is
+  exact for every finite E4M3 code. HC and PLE tensors use FP16.
+
+The deployment command is in the Qwen3.8 Flash Next cookbook page. Upstream
+already initializes the offloaded table on the meta device, so the fork's
+transient-VRAM fix (`qwen4_exp_v100.py`) is not needed.
+
+Not ported: the fork's decode-speed work on top of that: the NVFP4 MoE decode
+kernel and per-shape Marlin geometry (`sm70_nvfp4_moe_decode`), the SM70 Qwen
+fusions (`sm70_qwen_fusions`, HC mix/gate, dense GEMV, small GEMM) and the
+greedy TP top-1 logits path.
 They are written against the fork's Qwen3.8 model code, which upstream's
-`qwen4_exp.py` restructured, and need a V100 to re-tune.
+`qwen4_exp.py` restructured, and need a V100 to re-tune. Without them the
+model runs on the generic SM70 kernels, slower than the fork's 108-119 tok/s
+MTP decode.
 
 ## Verification status
 
@@ -396,6 +434,16 @@ Done without V100 hardware:
   minutes at `MAX_JOBS=1` and under 3 GiB per compiler process, producing only
   `sm_70` cubins. Every op the Python layers call is registered, and
   `check_v100_env.py --no-gpu` finds the library through `SGLANG_V100_EXT_DIR`.
+- Step 7, Qwen3.8 Flash Next: compiled for `sm_70` in FP16 at the TP4 shapes:
+  the QSA TileLang scorers (prefill, relative prefill, mask, decode with 4- and
+  16-row compressed pages), the QSA sparse-attention, gather, block-expansion
+  and PLE Triton kernels (all within 96 KiB of shared memory, including the
+  E5M2-to-FP16 gathers), the HC, PLE and gate Triton kernels, and the JIT CUDA
+  grouped Gemma RMSNorm, HC combine, QSA indexer and fast top-k. The FP8 PLE
+  decode is checked exactly against E4M3 (`test_qwen4_ple_offload.py`); the
+  SM70 routing, indexer dtype and head padding by
+  `test/registered/unit/layers/attention/test_qsa_sm70_routing.py`; the
+  16-token pages and FP16 offload default by `test_model_overrides.py`.
 - Step 7: the PCIe all-reduce mode is covered by
   `test_custom_all_reduce_v2_capability.py::test_pcie_config_selects_only_one_shot_push`.
   For MiniMax-H3, the TileLang dense varlen kernel compiles for `sm_70`;

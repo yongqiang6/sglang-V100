@@ -235,14 +235,21 @@ def sm70_cuda_qsa_indexer_decode(
     context_lens,
     max_model_len,
     score_scale,
+    *,
+    fill_unscored=True,
 ):
-    """Score compressed QSA index keys without Volta MMA head padding."""
+    """Score compressed QSA index keys without Volta MMA head padding.
+
+    The kernel writes positions below each row's context length only; with
+    ``fill_unscored`` the rest are -inf, as the TileLang scorer leaves them."""
     ext = _load_sm70_cuda_decode_ops()
     if ext is None:
         raise RuntimeError("SM70 CUDA QSA indexer extension is unavailable.")
-    logits = torch.empty(
-        (q.shape[0], max_model_len), dtype=torch.float32, device=q.device
-    )
+    shape = (q.shape[0], max_model_len)
+    if fill_unscored:
+        logits = torch.full(shape, -float("inf"), dtype=torch.float32, device=q.device)
+    else:
+        logits = torch.empty(shape, dtype=torch.float32, device=q.device)
     ext.sm70_qsa_indexer_decode(
         q.contiguous(),
         k_cache.contiguous(),

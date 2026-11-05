@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.device_pool_info import (
 )
 from sglang.srt.mem_cache.hicache_storage import PoolName
 from sglang.srt.mem_cache.memory_pool import GB, HybridLinearKVPool, MambaPool
+from sglang.srt.utils.common import get_device_sm, is_cuda
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,20 @@ def _index_k_bytes(*, kv_heads: int, head_dim: int, dtype: torch.dtype) -> int:
 QSA_INDEXER_DTYPE_CHOICES = ("auto", "bfloat16", "fp8_e4m3")
 
 
+def _sm70() -> bool:
+    return is_cuda() and get_device_sm() == 70
+
+
 def resolve_qsa_indexer_dtype(name: str) -> torch.dtype:
     """Storage dtype of the compressed QSA indexer cache for a CLI value."""
+    if _sm70():
+        # Volta's MMA takes FP16 operands only, so the scorer reads FP16 keys.
+        if name != "auto":
+            raise ValueError(
+                f"--qsa-indexer-dtype {name} is not supported on SM70 (V100); "
+                "use auto, which stores the indexer cache in float16."
+            )
+        return torch.float16
     if name in ("auto", "bfloat16"):
         return torch.bfloat16
     if name == "fp8_e4m3":
@@ -166,10 +179,17 @@ class QSATokenToKVPool(HybridLinearKVPool):
         self.qsa_index_kv_heads = int(qsa_index_kv_heads)
         self.qsa_token_topk = int(qsa_token_topk)
         self.qsa_block_topk = self.qsa_token_topk // self.qsa_compress_ratio
-        if qsa_indexer_dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+        if _sm70():
+            # The model computes in FP16 there, and the key-compress kernel
+            # requires the ring and the compressed cache to share that dtype.
+            self.index_state_dtype = torch.float16
+            allowed = (torch.float16,)
+        else:
+            allowed = (torch.bfloat16, torch.float8_e4m3fn)
+        if qsa_indexer_dtype not in allowed:
             raise ValueError(
-                "QSA compressed indexer cache dtype must be bfloat16 or "
-                f"float8_e4m3fn, got {qsa_indexer_dtype}"
+                f"QSA compressed indexer cache dtype must be one of {allowed}, "
+                f"got {qsa_indexer_dtype}"
             )
         # Storage dtype of the compressed keys and the index Q (the GEMM operands).
         self.qsa_compressed_dtype = qsa_indexer_dtype

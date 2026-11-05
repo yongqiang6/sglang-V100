@@ -985,6 +985,32 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 self._resolved(self._construct(*qwen4), "ple_offload_embedding")
             )
 
+    def test_qwen4_sm70_pages_and_ple_offload(self):
+        """SM70 serves compressed QSA on 16-token pages, which its CUDA kernels
+        read, and offloads the PLE table even at FP16, which a 32 GB V100 cannot
+        hold. Other GPUs keep 64-token pages and BF16-only offload."""
+        qwen4 = ("Qwen4ExpForConditionalGeneration", "qwen4_exp")
+        compressed = {
+            "indexer_n_heads": 4,
+            "indexer_kv_heads": 1,
+            "indexer_head_dim": 128,
+            "indexer_budget": 2048,
+            "indexer_compress_ratio": 4,
+        }
+        for device_sm, expected in ((70, (16, True)), (90, (64, False))):
+            with (
+                self.subTest(device_sm=device_sm),
+                override_platform(is_cuda=True, device_sm=device_sm),
+            ):
+                sa = self._construct(*qwen4, config_extra=compressed, dtype="float16")
+                self.assertEqual(
+                    (
+                        self._resolved(sa, "page_size"),
+                        self._resolved(sa, "ple_offload_embedding"),
+                    ),
+                    expected,
+                )
+
     def test_qwen4_fp8_indexer_dtype_platform_gate(self):
         """fp8_e4m3 needs CUDA SM90/SM100 and a compressed QSA indexer. The bf16
         spellings never consult the platform."""

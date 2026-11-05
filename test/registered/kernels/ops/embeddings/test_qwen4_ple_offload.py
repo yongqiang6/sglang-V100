@@ -315,6 +315,29 @@ def test_qwen4_ple_file_backend_fp8_table():
         torch.testing.assert_close(filed(ids), expected, rtol=0, atol=0)
 
 
+def test_qwen4_ple_gather_fp8_volta_decode_is_exact():
+    """SM70 has no E4M3 conversion, so its gather reads the table as fp8e4b15 and
+    rescales by 256; every finite E4M3FN code must reach FP16 unchanged."""
+    codes = torch.arange(256, dtype=torch.uint8, device=DEVICE)
+    table = codes.view(torch.float8_e4m3fn).reshape(1, 256).contiguous()
+    finite = ~torch.isnan(table.float())[0]
+    ids = torch.zeros(1, dtype=torch.int64, device=DEVICE)
+    out = torch.empty(1, 256, dtype=torch.float16, device=DEVICE)
+    qwen4_exp_module._gather_ple_embedding_from_pinned_kernel[(1,)](
+        table.data_ptr(),
+        ids,
+        out,
+        embedding_dim=256,
+        tp_vocab_start=0,
+        tp_vocab_end=1,
+        is_fp8=True,
+        emit_fp16=True,
+        BLOCK_D=256,
+    )
+    expected = table.to(torch.float16)
+    torch.testing.assert_close(out[0][finite], expected[0][finite], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     import sys
 

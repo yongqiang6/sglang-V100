@@ -101,9 +101,13 @@ from sglang.srt.models.qwen4_exp_ple_table import (
 )
 from sglang.srt.runtime_context import get_parallel, linear_attn_parallel_group
 from sglang.srt.utils import get_bool_env_var, is_cuda, is_hip, logger
+from sglang.srt.utils.common import get_device_sm
 
 _is_cuda = is_cuda()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
+# V100 (SM70) has no BF16 compute; the model and its HC/PLE tensors run in FP16.
+_is_sm70 = _is_cuda and get_device_sm() == 70
+_COMPUTE_DTYPE = torch.float16 if _is_sm70 else torch.bfloat16
 
 # Decode/verify-sized batches only: at prefill sizes both chains are compute
 # bound and serializing them on one stream is faster than contending.
@@ -643,12 +647,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     if _ple_table_is_fp8(config, quant_config, ngram_prefix)
                     else torch.bfloat16
                 ),
-                output_dtype=torch.bfloat16,
+                output_dtype=_COMPUTE_DTYPE,
                 use_attn_tp_group=self.use_attn_tp_ngram,
             )
         # weight_scale stays a real device tensor.
         ngram_embedding.register_buffer(
-            "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
+            "weight_scale", torch.ones(1, dtype=_COMPUTE_DTYPE), persistent=True
         )
         if offload_embedding:
             ngram_embedding = Qwen4ExpPinnedHostEmbedding(
@@ -878,6 +882,7 @@ def _gather_ple_embedding_from_pinned_kernel(
     tp_vocab_end,
     is_fp8: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    emit_fp16: tl.constexpr = False,
 ):
     row_id = tl.program_id(0)
     global_idx = tl.load(ids_ptr + row_id)
@@ -885,15 +890,30 @@ def _gather_ple_embedding_from_pinned_kernel(
     local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0)
     offsets = tl.arange(0, BLOCK_D)
     mask = offsets < embedding_dim
-    if is_fp8:
-        weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.float8e4nv))
+    out_dtype = tl.float16 if emit_fp16 else tl.bfloat16
+    if is_fp8 and emit_fp16:
+        # SM70 has no E4M3 conversion. Read the bytes as fp8e4b15, which Triton
+        # decodes in software: the same bits with an exponent bias of 15 instead
+        # of 7, i.e. the E4M3FN value times 2^-8.
+        weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.float8e4b15))
+        values = (
+            tl.load(
+                weight_ptr + local_idx * embedding_dim + offsets,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            * 256.0
+        ).to(out_dtype)
     else:
-        weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.bfloat16))
-    values = tl.load(
-        weight_ptr + local_idx * embedding_dim + offsets,
-        mask=mask,
-        other=0.0,
-    ).to(tl.bfloat16)
+        if is_fp8:
+            weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.float8e4nv))
+        else:
+            weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.bfloat16))
+        values = tl.load(
+            weight_ptr + local_idx * embedding_dim + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(out_dtype)
     tl.store(
         output_ptr + row_id * embedding_dim + offsets,
         tl.where(in_range, values, 0.0),
@@ -993,8 +1013,8 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
                 get_parallel().tp_group, disabled=not is_allocation_symmetric()
             )
         with allocation_context, torch.inference_mode(False):
-            # The gather kernel emits bf16 rows regardless of the table dtype.
-            return torch.empty(shape, dtype=torch.bfloat16, device=device)
+            # The gather kernel emits compute-dtype rows whatever the table dtype.
+            return torch.empty(shape, dtype=_COMPUTE_DTYPE, device=device)
 
     def gather(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None
@@ -1008,9 +1028,9 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
                     f"invalid PLE prefetch output shape: {tuple(out.shape)} != "
                     f"{expected_shape}"
                 )
-            if out.dtype != torch.bfloat16 or out.device != input_ids.device:
+            if out.dtype != _COMPUTE_DTYPE or out.device != input_ids.device:
                 raise ValueError(
-                    "PLE prefetch output must be bfloat16 on the id device"
+                    f"PLE prefetch output must be {_COMPUTE_DTYPE} on the id device"
                 )
             output = out
 
@@ -1030,6 +1050,7 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
                 tp_vocab_start=self.shard_indices.org_vocab_start_index,
                 tp_vocab_end=self.shard_indices.org_vocab_end_index,
                 is_fp8=self.weight.dtype == torch.float8_e4m3fn,
+                emit_fp16=_COMPUTE_DTYPE == torch.float16,
                 BLOCK_D=self._block_d,
             )
         return output
@@ -1591,7 +1612,7 @@ class Qwen4ExpLayerExtensionMixin:
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,
             hidden_size=self.hidden_size,
-            params_dtype=torch.bfloat16,
+            params_dtype=_COMPUTE_DTYPE,
             hc_lowrank=config.hc_lowrank,
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,
@@ -1881,10 +1902,12 @@ class Qwen4ExpAttentionDecoderLayer(
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        from sglang.srt.layers.attention.qsa import sm70 as qsa_sm70
         from sglang.srt.layers.attention.qsa.glue import (
             get_qsa_indexer_metadata,
             resolve_qsa_sparse_backend,
         )
+        from sglang.srt.layers.attention.qsa.qsa_indexer import QSAIndexer
 
         backend = get_attn_backend()
         sparse_backend = resolve_qsa_sparse_backend(backend)
@@ -1899,7 +1922,24 @@ class Qwen4ExpAttentionDecoderLayer(
             backend, self.layer_id, forward_batch
         )
         indexer_kwargs = {}
-        if _shards_rows_over_cp(forward_batch):
+        should_capture = getattr(
+            sparse_backend, "should_capture_mtp_sparse_indices", None
+        )
+        capture_indices = should_capture is not None and should_capture(forward_batch)
+        shards_rows_over_cp = _shards_rows_over_cp(forward_batch)
+        if (
+            isinstance(self.indexer, QSAIndexer)
+            and not capture_indices
+            and not shards_rows_over_cp
+            and qsa_sm70.use_dense_prefill(
+                forward_batch, hidden_states.device, self.head_dim
+            )
+        ):
+            # SM70 dense prefill reads no selection. MTP draft prefill still
+            # selects (it seeds its next decode's indices), and so does
+            # context parallelism, whose backend path is sparse.
+            indexer_kwargs["skip_prefill_selection"] = True
+        if shards_rows_over_cp:
             # Prefill CP: this rank's rows select against the index keys of the
             # whole sequence, gathered in token order with the RoPE positions
             # the model split (the batch keeps them whole).
@@ -1915,10 +1955,7 @@ class Qwen4ExpAttentionDecoderLayer(
             indexer_metadata,
             **indexer_kwargs,
         )
-        should_capture = getattr(
-            sparse_backend, "should_capture_mtp_sparse_indices", None
-        )
-        if should_capture is not None and should_capture(forward_batch):
+        if capture_indices:
             sparse_backend.capture_mtp_sparse_indices(
                 topk_indices, forward_batch, self.layer_id, metadata=indexer_metadata
             )
@@ -2053,7 +2090,7 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,
             hidden_size=self.hidden_size,
-            params_dtype=torch.bfloat16,
+            params_dtype=_COMPUTE_DTYPE,
             hc_lowrank=config.hc_lowrank,
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,

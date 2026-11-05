@@ -42,9 +42,11 @@ def _qwen4_exp_overrides(server_args: Any, hf_config: Any) -> dict:
     if cfg.ple_offload_embedding is None:
         import torch
 
-        overrides["ple_offload_embedding"] = (
-            get_platform().is_cuda
-            and model_config_of(server_args).dtype == torch.bfloat16
+        # The host gather emits the compute dtype: BF16, or FP16 on SM70, where
+        # the model runs FP16 and a 32 GB V100 cannot hold its table shard.
+        overrides["ple_offload_embedding"] = get_platform().is_cuda and (
+            model_config_of(server_args).dtype == torch.bfloat16
+            or get_platform().device_sm == 70
         )
 
     text_config = getattr(hf_config, "text_config", hf_config)
@@ -89,9 +91,14 @@ def _qwen4_exp_overrides(server_args: Any, hf_config: Any) -> dict:
     if profile is not None:
         # Compressed slot = full_slot // ratio; all backends need page-aligned pages.
         # mamba_radix_cache_strategy resolves later, so do not gate on it.
-        overrides["page_size"] = 64
+        # SM70's QSA kernels read 16-token pages (4-row compressed pages).
+        page_size = (
+            16 if get_platform().is_cuda and get_platform().device_sm == 70 else 64
+        )
+        overrides["page_size"] = page_size
         logger.info(
-            "Setting page size to 64 for compressed QSA "
-            "(full//ratio compressed addressing)."
+            "Setting page size to %d for compressed QSA "
+            "(full//ratio compressed addressing).",
+            page_size,
         )
     return overrides
