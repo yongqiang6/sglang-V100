@@ -2552,11 +2552,14 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         # TRTLLM replaces blockscale_swizzled with an alias to weight_scale
         # during process_weights_after_loading, so skip the expensive
-        # swizzle+allocate here to avoid GPU memory fragmentation
-        if (
+        # swizzle+allocate here to avoid GPU memory fragmentation. SM70 always
+        # runs Marlin, which never reads them.
+        skip_swizzled_blockscales = (
             self.enable_flashinfer_trtllm_moe
             or get_moe_runner_backend().is_flashinfer_megamoe()
-        ):
+            or marlin_uses_sm70_layout()
+        )
+        if skip_swizzled_blockscales:
             layer.w13_blockscale_swizzled = None
         else:
             layer.w13_blockscale_swizzled = Parameter(
@@ -2576,10 +2579,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
-        if (
-            self.enable_flashinfer_trtllm_moe
-            or get_moe_runner_backend().is_flashinfer_megamoe()
-        ):
+        if skip_swizzled_blockscales:
             layer.w2_blockscale_swizzled = None
         else:
             layer.w2_blockscale_swizzled = Parameter(

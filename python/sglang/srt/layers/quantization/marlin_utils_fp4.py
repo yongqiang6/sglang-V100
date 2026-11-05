@@ -394,6 +394,16 @@ def deinterleave_moe_mxfp4_w13_for_marlin(layer: torch.nn.Module) -> None:
         w13_bias.data = bias.view(e, n // 2, 2).permute(0, 2, 1).contiguous().view(e, n)
 
 
+def _write_expert(out: torch.Tensor, expert: int, value: torch.Tensor) -> None:
+    # copy_ would broadcast or cast a mismatched result instead of failing.
+    if value.shape != out.shape[1:] or value.dtype != out.dtype:
+        raise RuntimeError(
+            f"Marlin expert layout {tuple(value.shape)} {value.dtype} does not fit "
+            f"the in-place buffer {tuple(out.shape[1:])} {out.dtype}"
+        )
+    out[expert].copy_(value)
+
+
 def _repack_moe_fp4_weight_for_marlin(
     weight: torch.Tensor,
     *,
@@ -401,7 +411,13 @@ def _repack_moe_fp4_weight_for_marlin(
     size_n: int,
     size_k: int,
     perm: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """With ``out``, each expert's Marlin words are written to ``out[expert]``.
+
+    ``out`` may alias ``weight``: an expert is repacked into a temporary
+    before its own bytes are overwritten, and no other expert's bytes are.
+    """
     assert weight.shape == (num_experts, size_n, size_k // 2)
 
     tensor_list = []
@@ -414,8 +430,11 @@ def _repack_moe_fp4_weight_for_marlin(
             size_n=size_n,
             num_bits=4,
         )
-        tensor_list.append(marlin_qweight)
-    return torch.stack(tensor_list)
+        if out is None:
+            tensor_list.append(marlin_qweight)
+        else:
+            _write_expert(out, i, marlin_qweight)
+    return torch.stack(tensor_list) if out is None else out
 
 
 def _permute_moe_fp4_scales_for_marlin(
@@ -426,18 +445,25 @@ def _permute_moe_fp4_scales_for_marlin(
     size_k: int,
     group_size: int,
     process_scales: Callable[[torch.Tensor], torch.Tensor],
+    dtype: Optional[torch.dtype] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """``dtype`` casts one expert at a time; ``out`` may alias ``scales`` as in
+    _repack_moe_fp4_weight_for_marlin."""
     tensor_list = []
     for i in range(num_experts):
-        scale = scales[i].T.contiguous()
+        scale = scales[i] if dtype is None else scales[i].to(dtype)
         marlin_scales = marlin_permute_scales(
-            s=scale,
+            s=scale.T.contiguous(),
             size_k=size_k,
             size_n=size_n,
             group_size=group_size,
         )
-        tensor_list.append(process_scales(marlin_scales))
-    return torch.stack(tensor_list)
+        if out is None:
+            tensor_list.append(process_scales(marlin_scales))
+        else:
+            _write_expert(out, i, process_scales(marlin_scales))
+    return torch.stack(tensor_list) if out is None else out
 
 
 def prepare_moe_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
@@ -602,9 +628,11 @@ def prepare_moe_nvfp4_layer_for_marlin(
     layer.workspace = marlin_make_workspace(device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
 
+    padded = False
     if not layer.moe_runner_config.is_gated:
         padded_intermediate_size = ((intermediate_size + 127) // 128) * 128
         intermediate_size_pad = padded_intermediate_size - intermediate_size
+        padded = intermediate_size_pad > 0
         if intermediate_size_pad:
             w13 = torch.nn.functional.pad(w13, (0, 0, 0, intermediate_size_pad))
             w13_scale = torch.nn.functional.pad(
@@ -632,6 +660,26 @@ def prepare_moe_nvfp4_layer_for_marlin(
             tensor_list.append(marlin_permute_bias(bias[i].to(param_dtype)))
         return torch.stack(tensor_list)
 
+    # A Marlin expert occupies the bytes of its checkpoint layout: [N, K/2] uint8
+    # weights become [K/16, 2N] int32 and [N, K/16] scales become [K/16, N]. SM70
+    # repacks into the loaded storage, so post-processing never needs a second
+    # copy of the experts (Qwen3.8 Flash Next ran 32 GiB V100s out of memory here).
+    in_place = (
+        marlin_uses_sm70_layout()
+        and not padded
+        and all(t.is_contiguous() for t in (w13, w2, w13_scale, w2_scale))
+    )
+
+    def _weight_out(weight: torch.Tensor, size_n: int, size_k: int):
+        if not in_place:
+            return None
+        return weight.view(torch.int32).view(num_experts, size_k // 16, size_n * 2)
+
+    def _scale_out(scale: torch.Tensor, size_n: int, size_k: int):
+        if not in_place:
+            return None
+        return scale.view(num_experts, size_k // 16, size_n)
+
     layer.w13_weight = torch.nn.Parameter(
         _repack_moe_fp4_weight_for_marlin(
             w13,
@@ -639,34 +687,44 @@ def prepare_moe_nvfp4_layer_for_marlin(
             size_n=w13_size_n,
             size_k=w13_size_k,
             perm=perm,
+            out=_weight_out(w13, w13_size_n, w13_size_k),
         ),
         requires_grad=False,
     )
     layer.w2_weight = torch.nn.Parameter(
         _repack_moe_fp4_weight_for_marlin(
-            w2, num_experts=num_experts, size_n=w2_size_n, size_k=w2_size_k, perm=perm
+            w2,
+            num_experts=num_experts,
+            size_n=w2_size_n,
+            size_k=w2_size_k,
+            perm=perm,
+            out=_weight_out(w2, w2_size_n, w2_size_k),
         ),
         requires_grad=False,
     )
     layer.w13_weight_scale = torch.nn.Parameter(
         _permute_moe_fp4_scales_for_marlin(
-            w13_scale.to(param_dtype),
+            w13_scale if in_place else w13_scale.to(param_dtype),
             num_experts=num_experts,
             size_n=w13_size_n,
             size_k=w13_size_k,
             group_size=16,
             process_scales=nvfp4_marlin_process_scales,
+            dtype=param_dtype if in_place else None,
+            out=_scale_out(w13_scale, w13_size_n, w13_size_k),
         ),
         requires_grad=False,
     )
     layer.w2_weight_scale = torch.nn.Parameter(
         _permute_moe_fp4_scales_for_marlin(
-            w2_scale.to(param_dtype),
+            w2_scale if in_place else w2_scale.to(param_dtype),
             num_experts=num_experts,
             size_n=w2_size_n,
             size_k=w2_size_k,
             group_size=16,
             process_scales=nvfp4_marlin_process_scales,
+            dtype=param_dtype if in_place else None,
+            out=_scale_out(w2_scale, w2_size_n, w2_size_k),
         ),
         requires_grad=False,
     )

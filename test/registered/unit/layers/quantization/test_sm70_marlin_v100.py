@@ -143,6 +143,114 @@ class TestSm70MarlinV100(CustomTestCase):
         torch.testing.assert_close(sm70, global_scale * 2**7, rtol=0, atol=0)
         torch.testing.assert_close(sm80.float(), sm70, rtol=0, atol=0)
 
+    def test_sm70_nvfp4_moe_repacks_into_loaded_storage(self):
+        """Qwen3.8 Flash Next ran out of memory on 32 GiB V100s during NVFP4 MoE
+        post-processing, which held a second copy of the experts. On SM70 the
+        Marlin experts and scales must reuse the loaded storage, match the
+        out-of-place repack, and skip the FlashInfer-only swizzled scales."""
+        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+        from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
+        from sglang.srt.layers.moe.utils import MoeA2ABackend, MoeRunnerBackend
+        from sglang.srt.layers.quantization.modelopt_quant import (
+            ModelOptNvFp4FusedMoEMethod,
+        )
+        from sglang.srt.runtime_context import get_flags
+
+        experts, hidden, intermediate = 4, 128, 64
+
+        def fake_repack(b_q_weight, perm, size_k, size_n, num_bits):
+            # Value-dependent, so a slot read after being overwritten shows up.
+            return b_q_weight.reshape(size_k // 16, size_n * 2) * 3 + 1
+
+        with ExitStack() as stack:
+            _sm70_marlin_v100_active(stack)
+            stack.enter_context(
+                get_flags().moe.override(
+                    runner_backend=MoeRunnerBackend.MARLIN,
+                    a2a_backend=MoeA2ABackend.NONE,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    marlin_utils_fp4, "gptq_marlin_repack", fake_repack, create=True
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    marlin_utils_fp4,
+                    "marlin_make_workspace",
+                    lambda device, max_blocks_per_sm: torch.zeros(1, dtype=torch.int),
+                )
+            )
+            quant_config = Mock(group_size=16, use_per_token_activation=False)
+            quant_config.get_name.return_value = "modelopt_fp4"
+            method = ModelOptNvFp4FusedMoEMethod(quant_config)
+            layer = FusedMoE.__new__(FusedMoE)
+            torch.nn.Module.__init__(layer)
+            layer.quant_method = method
+            layer.moe_runner_config = MoeRunnerConfig(is_gated=True)
+            layer.num_local_experts = layer.num_experts = experts
+            method.create_weights(
+                layer=layer,
+                num_experts=experts,
+                hidden_size=hidden,
+                intermediate_size_per_partition=intermediate,
+                params_dtype=torch.float16,
+                weight_loader=layer.weight_loader,
+            )
+            self.assertIsNone(layer.w13_blockscale_swizzled)
+            self.assertIsNone(layer.w2_blockscale_swizzled)
+
+            generator = torch.Generator().manual_seed(0)
+            for name in ("w13_weight", "w2_weight"):
+                data = getattr(layer, name).data
+                data.copy_(torch.randint(0, 256, data.shape, generator=generator))
+            for name in ("w13_weight_scale", "w2_weight_scale"):
+                # Positive E4M3 codes; NVFP4 Marlin scales must be non-negative.
+                data = getattr(layer, name).data.view(torch.uint8)
+                data.copy_(torch.randint(0x08, 0x70, data.shape, generator=generator))
+            layer.w13_weight_scale_2.data.fill_(0.5)
+            layer.w2_weight_scale_2.data.fill_(0.25)
+
+            perm = torch.empty(0, dtype=torch.int)
+            shapes = {
+                "w13": (2 * intermediate, hidden),
+                "w2": (hidden, intermediate),
+            }
+            expected, loaded_ptrs = {}, {}
+            for prefix, (size_n, size_k) in shapes.items():
+                weight = getattr(layer, f"{prefix}_weight").data
+                scale = getattr(layer, f"{prefix}_weight_scale").data
+                loaded_ptrs[prefix] = (weight.data_ptr(), scale.data_ptr())
+                expected[prefix] = (
+                    marlin_utils_fp4._repack_moe_fp4_weight_for_marlin(
+                        weight.clone(),
+                        num_experts=experts,
+                        size_n=size_n,
+                        size_k=size_k,
+                        perm=perm,
+                    ),
+                    marlin_utils_fp4._permute_moe_fp4_scales_for_marlin(
+                        scale.to(torch.float16),
+                        num_experts=experts,
+                        size_n=size_n,
+                        size_k=size_k,
+                        group_size=16,
+                        process_scales=marlin_utils_fp4.nvfp4_marlin_process_scales,
+                    ),
+                )
+
+            method.process_weights_after_loading(layer)
+
+        for prefix, (expected_weight, expected_scale) in expected.items():
+            weight = getattr(layer, f"{prefix}_weight")
+            scale = getattr(layer, f"{prefix}_weight_scale")
+            self.assertEqual((weight.data_ptr(), scale.data_ptr()), loaded_ptrs[prefix])
+            torch.testing.assert_close(weight, expected_weight, rtol=0, atol=0)
+            torch.testing.assert_close(
+                scale.view(torch.uint8), expected_scale.view(torch.uint8)
+            )
+
     def test_fp8_marlin_on_sm70_requires_marlin_v100(self):
         """FP8 checkpoints load on SM70 only as weight-only Marlin, which needs
         marlin_v100; without it the SM80 floor must stay."""

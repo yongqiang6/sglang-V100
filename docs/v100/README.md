@@ -312,6 +312,17 @@ step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
   on SM70 it is computed from the FP32 checkpoint value. FP16 activations only
   (always the case on V100).
 
+- NVFP4 MoE memory on SM70: a Marlin expert takes exactly the bytes of its
+  checkpoint layout, so SM70 repacks the expert weights and block scales back
+  into the loaded storage instead of building new tensors. With upstream's
+  out-of-place repack, Qwen3.8 Flash Next ran out of memory on 32 GiB V100s at
+  TP4 during this step: allocated memory rose from 21.8 GiB after loading to
+  31.1 GiB. The per-layer allocation sizes in that log show the old expert
+  tensors were not being released. Repacking in place leaves no second copy to
+  hold. SM70 also skips the swizzled block-scale placeholders, which only
+  FlashInfer reads (2.1 GiB per GPU for that model at TP4); the fork freed the
+  same placeholders after loading.
+
 - PCIe custom all-reduce: upstream disables custom all-reduce above two GPUs
   without full NVLink. `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` keeps it (V100 PCIe
   cards, or SXM2 boards whose GPUs are not all NVLink peers) and restricts
@@ -412,8 +423,11 @@ Done without V100 hardware:
   `sm_70`. `test/registered/kernels/ops/kvcache/test_e5m2_satfinite.py` runs it
   on GPU.
 - Step 7: NVFP4 on SM70 is covered at the contract level (FP32 global scale,
-  capability gates, MXFP4 rejection) in `test_sm70_marlin_v100.py`; no NVFP4
-  checkpoint has been run.
+  capability gates, MXFP4 rejection, the MoE repack reusing the loaded storage
+  and matching the out-of-place result) in `test_sm70_marlin_v100.py`. Run on
+  CPU at Qwen3.8 Flash Next TP4 shapes (512 experts) with stubbed kernels, the
+  repack holds memory flat across layers. No NVFP4 checkpoint has completed
+  loading on a V100 with this change yet.
 - Step 6: in the Triton interpreter, FP16-state chain verify equals T
   sequential decodes bit for bit (23.6% of outputs differ without the reload),
   and the SM70 BV=8 verify launch equals BV=32
