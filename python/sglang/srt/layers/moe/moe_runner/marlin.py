@@ -112,6 +112,64 @@ class MarlinMoeQuantInfo(MoeQuantInfo):
     w2_bias: Optional[torch.Tensor] = None
 
 
+def _use_sm70_nvfp4_decode(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    quant_info: MarlinMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+) -> bool:
+    """Whether this call is the exact NVFP4 decode shape the SM70 kernel runs.
+
+    The kernel computes plain gated SiLU, applies the router weights and sums
+    the routes, so anything that changes those semantics stays on Marlin.
+    """
+    from sglang.kernels.ops.moe import sm70_nvfp4_moe_decode as sm70
+
+    num_tokens = hidden_states.shape[0]
+    return (
+        hidden_states.dtype == torch.float16
+        and hidden_states.ndim == 2
+        and 1 <= num_tokens <= sm70.MAX_TOKENS
+        and hidden_states.shape[1] == sm70.HIDDEN_SIZE
+        and tuple(topk_ids.shape) == (num_tokens, sm70.TOP_K)
+        and topk_ids.dtype == torch.int32
+        and topk_weights.dtype == torch.float32
+        and topk_ids.is_contiguous()
+        and topk_weights.is_contiguous()
+        and quant_info.weight_bits == 4
+        and quant_info.w13_qweight.dtype == torch.int32
+        and tuple(quant_info.w13_qweight.shape) == sm70.W13_SHAPE
+        and tuple(quant_info.w2_qweight.shape) == sm70.W2_SHAPE
+        and quant_info.w13_scales.dtype == torch.float8_e4m3fn
+        and quant_info.w2_scales.dtype == torch.float8_e4m3fn
+        and quant_info.w13_qzeros is None
+        and quant_info.w2_qzeros is None
+        and quant_info.w13_g_idx is None
+        and quant_info.w2_g_idx is None
+        and quant_info.w13_bias is None
+        and quant_info.w2_bias is None
+        and quant_info.expert_map is None
+        and quant_info.w13_global_scale is not None
+        and quant_info.w2_global_scale is not None
+        and quant_info.w13_global_scale.dtype == torch.float32
+        and quant_info.w2_global_scale.dtype == torch.float32
+        and quant_info.w13_global_scale.numel() == sm70.NUM_EXPERTS
+        and quant_info.w2_global_scale.numel() == sm70.NUM_EXPERTS
+        and runner_config.num_experts == sm70.NUM_EXPERTS
+        and runner_config.num_local_experts == sm70.NUM_EXPERTS
+        and runner_config.is_gated
+        and runner_config.activation == "silu"
+        and runner_config.gemm1_alpha is None
+        and runner_config.gemm1_clamp_limit is None
+        and runner_config.swiglu_limit is None
+        and not runner_config.no_combine
+        and runner_config.routed_scaling_factor in (None, 1.0)
+        and sm70.sm70_nvfp4_moe_decode_available()
+        and sm70.sm70_nvfp4_moe_ops_loaded()
+    )
+
+
 @register_fused_func("none", "marlin")
 def fused_experts_none_to_marlin(
     dispatch_output: StandardDispatchOutput,
@@ -153,6 +211,31 @@ def fused_experts_none_to_marlin(
     assert (
         not runner_config.no_combine or runner_config.no_combine_keep_router_weight
     ), "Marlin MoE supports no_combine only with no_combine_keep_router_weight"
+
+    if _use_sm70_nvfp4_decode(
+        hidden_states,
+        topk_output.topk_ids,
+        topk_output.topk_weights,
+        quant_info,
+        runner_config,
+    ):
+        from sglang.kernels.ops.moe.sm70_nvfp4_moe_decode import (
+            sm70_nvfp4_moe_decode,
+        )
+
+        return StandardCombineInput(
+            hidden_states=sm70_nvfp4_moe_decode(
+                hidden_states,
+                quant_info.w13_qweight,
+                quant_info.w2_qweight,
+                quant_info.w13_scales,
+                quant_info.w2_scales,
+                quant_info.w13_global_scale,
+                quant_info.w2_global_scale,
+                topk_output.topk_ids,
+                topk_output.topk_weights,
+            )
+        )
 
     # Use a per-call workspace so captured graphs cannot alias Marlin's
     # inter-block reduction locks and deadlock during capture.

@@ -1259,6 +1259,9 @@ class Envs:
     # Native CUDA long-context decode partial; JIT build directory.
     SGLANG_V100_DECODE_CUDA = EnvBool(True)
     SGLANG_V100_DECODE_CUDA_BUILD_DIR = EnvStr("/tmp/sglang_sm70_longctx_decode")
+    # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape (M <= 4);
+    # built under SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
+    SGLANG_V100_NVFP4_MOE_DECODE = EnvBool(True)
     SGLANG_SM70_QSA_COMBINE = EnvBool(True)
     # QSA (Qwen3.8 Flash Next): prefix-free prefills up to this many tokens, and
     # decode when the context limit fits it, run dense attention; 0 disables.

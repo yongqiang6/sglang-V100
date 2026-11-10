@@ -251,6 +251,101 @@ class TestSm70MarlinV100(CustomTestCase):
                 scale.view(torch.uint8), expected_scale.view(torch.uint8)
             )
 
+    def test_sm70_nvfp4_scales_match_the_decode_kernel_reader(self):
+        """The SM70 NVFP4 MoE decode kernel reads the scale for logical column n
+        at stored byte {0,2,1,3}[n % 4] of its group of four, as the FP16 bits
+        ``byte << 7`` == scale * 128. Every non-negative finite E4M3 code must
+        survive SGLang's Marlin scale encoding that way."""
+        codes = torch.arange(0x00, 0x7F, dtype=torch.uint8)
+        codes = torch.cat([codes, codes.new_zeros(-codes.numel() % 4)])
+        logical = codes.view(torch.float8_e4m3fn).reshape(1, -1)
+        stored = marlin_utils_fp4.nvfp4_marlin_process_scales(logical.half())
+        stored = stored.view(torch.uint8).reshape(-1, 4)[:, [0, 2, 1, 3]].reshape(-1)
+        decoded = (stored.to(torch.int16) << 7).view(torch.float16).float()
+        torch.testing.assert_close(
+            decoded, logical.float().reshape(-1) * 128, rtol=0, atol=0
+        )
+
+    def test_sm70_nvfp4_moe_decode_gates(self):
+        """The decode kernel and its top-10 router hard-code one shape and plain
+        gated-SiLU / softmax semantics; every other variant must stay on
+        Marlin and the Triton router instead of being computed wrongly."""
+        from sglang.kernels.ops.moe import sm70_nvfp4_moe_decode as sm70
+        from sglang.srt.layers.moe import topk as topk_module
+        from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
+        from sglang.srt.layers.moe.moe_runner.marlin import (
+            MarlinMoeQuantInfo,
+            _use_sm70_nvfp4_decode,
+        )
+
+        def meta(shape, dtype):
+            return torch.empty(shape, dtype=dtype, device="meta")
+
+        def decode_case(tokens=1, weight_dtype=torch.float32, quant=(), config=()):
+            quant_info = dict(
+                w13_qweight=meta(sm70.W13_SHAPE, torch.int32),
+                w2_qweight=meta(sm70.W2_SHAPE, torch.int32),
+                w13_scales=meta((512, 160, 320), torch.float8_e4m3fn),
+                w2_scales=meta((512, 10, 2560), torch.float8_e4m3fn),
+                w13_g_idx_sort_indices=None,
+                w2_g_idx_sort_indices=None,
+                weight_bits=4,
+                w13_global_scale=meta((512,), torch.float32),
+                w2_global_scale=meta((512,), torch.float32),
+            )
+            return _use_sm70_nvfp4_decode(
+                torch.zeros(tokens, 2560, dtype=torch.float16),
+                torch.zeros(tokens, 10, dtype=torch.int32),
+                torch.zeros(tokens, 10, dtype=weight_dtype),
+                MarlinMoeQuantInfo(**{**quant_info, **dict(quant)}),
+                MoeRunnerConfig(
+                    **{"num_experts": 512, "num_local_experts": 512, **dict(config)}
+                ),
+            )
+
+        def topk_case(tokens=1, topk=10, renormalize=True, bias=None, shared=0):
+            logits = torch.zeros(tokens, 512, dtype=torch.float16)
+            return topk_module._use_sm70_topk10_softmax(
+                logits, topk, renormalize, bias, shared
+            )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(topk_module, "_is_cuda", True))
+            for name in (
+                "sm70_nvfp4_moe_decode_available",
+                "sm70_nvfp4_moe_ops_loaded",
+            ):
+                stack.enter_context(patch.object(sm70, name, lambda: True))
+
+            self.assertTrue(decode_case())
+            self.assertTrue(decode_case(tokens=4))
+            for label, rejected in {
+                "five tokens": decode_case(tokens=5),
+                "bf16 router weights": decode_case(weight_dtype=torch.bfloat16),
+                "routed scaling": decode_case(config={"routed_scaling_factor": 2.5}),
+                "swiglu clamp": decode_case(config={"swiglu_limit": 7.0}),
+                "gemm1 alpha": decode_case(config={"gemm1_alpha": 1.702}),
+                "no combine": decode_case(config={"no_combine": True}),
+                "expert parallel": decode_case(config={"num_local_experts": 128}),
+                "expert map": decode_case(quant={"expert_map": torch.zeros(512)}),
+                "w13 bias": decode_case(quant={"w13_bias": torch.zeros(1)}),
+                "zero points": decode_case(quant={"w13_qzeros": torch.zeros(1)}),
+                "other hidden size": decode_case(
+                    quant={"w13_qweight": meta((512, 128, 640), torch.int32)}
+                ),
+            }.items():
+                self.assertFalse(rejected, label)
+
+            self.assertTrue(topk_case())
+            for label, rejected in {
+                "five tokens": topk_case(tokens=5),
+                "top-8": topk_case(topk=8),
+                "no renormalize": topk_case(renormalize=False),
+                "correction bias": topk_case(bias=torch.zeros(512)),
+                "fused shared expert": topk_case(shared=1),
+            }.items():
+                self.assertFalse(rejected, label)
+
     def test_fp8_marlin_on_sm70_requires_marlin_v100(self):
         """FP8 checkpoints load on SM70 only as weight-only Marlin, which needs
         marlin_v100; without it the SM80 floor must stay."""

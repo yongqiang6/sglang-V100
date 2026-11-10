@@ -358,3 +358,22 @@ register_kernel(
         capabilities=CUDA_ONLY,
     )
 )
+
+# V100 (SM70) small-batch NVFP4 MoE decode and its top-10 router.
+_SM70_ONLY = frozenset({CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))})
+register_kernel(
+    KernelSpec(
+        op="moe.sm70_nvfp4_moe_decode",
+        backend=KernelBackend.JIT,
+        target="sglang.kernels.ops.moe.sm70_nvfp4_moe_decode:sm70_nvfp4_moe_decode",
+        capabilities=_SM70_ONLY,
+    )
+)
+register_kernel(
+    KernelSpec(
+        op="moe.sm70_topk10_softmax",
+        backend=KernelBackend.JIT,
+        target="sglang.kernels.ops.moe.sm70_nvfp4_moe_decode:sm70_topk10_softmax",
+        capabilities=_SM70_ONLY,
+    )
+)

@@ -73,9 +73,12 @@ TP ranks, so the host needs that much free RAM on top of the page cache. Docker
 also needs `--ulimit memlock=-1`. Pages are 16 tokens and the KV cache is E5M2,
 which the SM70 QSA kernels read directly. This is the sglang-V100 fork's
 validated single-request, full-context MTP profile (108-119 tok/s decode there)
-in current flags. On the current code it has passed unit tests and `sm_70`
-compile checks only, so it has not been rerun on a V100, and the fork's
-decode fusions are not ported yet.
+in current flags. On the current code, without the fork's decode kernels, it
+served on 4x V100 PCIe at about 38 tok/s with MTP (accept length 3.05),
+against about 70 on the fork's image there. The fork's NVFP4 MoE decode kernel
+is now ported (not yet measured); its GEMV and hyper-connection fusions are
+not. On PCIe-only servers keep `NCCL_P2P_LEVEL=NVL`: NCCL hung at startup
+there without it.
 
 ```bash 4×V100 32GB
 NCCL_P2P_LEVEL=NVL \

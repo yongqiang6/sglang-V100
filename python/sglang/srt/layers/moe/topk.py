@@ -168,6 +168,33 @@ _RENORMALIZE_SUM_EPSILON = 1e-20
 _skip_hip_pad_mask = get_bool_env_var("SGLANG_MORI_NO_PAD_MASK", "False")
 
 
+def _use_sm70_topk10_softmax(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    correction_bias: Optional[torch.Tensor],
+    num_fused_shared_experts: int,
+) -> bool:
+    """The SM70 decode router: softmax top-10 of 512 experts, renormalized."""
+    if not _is_cuda:
+        return False
+    from sglang.kernels.ops.moe import sm70_nvfp4_moe_decode as sm70
+
+    num_tokens = gating_output.shape[0]
+    return (
+        gating_output.ndim == 2
+        and 1 <= num_tokens <= sm70.MAX_TOKENS
+        and gating_output.shape[1] == sm70.NUM_EXPERTS
+        and gating_output.dtype in (torch.float16, torch.float32)
+        and topk == sm70.TOP_K
+        and renormalize
+        and correction_bias is None
+        and num_fused_shared_experts == 0
+        and sm70.sm70_nvfp4_moe_decode_available()
+        and sm70.sm70_nvfp4_moe_ops_loaded()
+    )
+
+
 def _use_rocm_triton_softmax_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -1376,6 +1403,14 @@ def fused_topk(
                 packed_out=packed_out,
             )
         # ===== END TO BE REFACTORED ====
+        elif _use_sm70_topk10_softmax(
+            gating_output, topk, renormalize, correction_bias, num_fused_shared_experts
+        ):
+            from sglang.kernels.ops.moe.sm70_nvfp4_moe_decode import (
+                sm70_topk10_softmax,
+            )
+
+            topk_weights, topk_ids = sm70_topk10_softmax(gating_output)
         elif _is_cuda or use_rocm_triton:
             # Unified Triton router (subsumes the AOT topk_softmax CUDA kernel).
             from sglang.kernels.ops.moe.moe_fused_gate import (

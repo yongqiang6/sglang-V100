@@ -13,7 +13,7 @@ what still needs a V100 to validate.
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ/FP8; TurboMind FP16 MoE, block-FP8 W8A16 and AWQ W4A16; QPN8 FP8 decode | Done |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Done (TileLang native verify not ported) |
-| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (Qwen3.8 SM70 decode fusions not ported) |
+| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (NVFP4 MoE decode kernel ported; Qwen3.8 GEMV/HC fusions not ported) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -381,14 +381,23 @@ The deployment command is in the Qwen3.8 Flash Next cookbook page. Upstream
 already initializes the offloaded table on the meta device, so the fork's
 transient-VRAM fix (`qwen4_exp_v100.py`) is not needed.
 
-Not ported: the fork's decode-speed work on top of that: the NVFP4 MoE decode
-kernel and per-shape Marlin geometry (`sm70_nvfp4_moe_decode`), the SM70 Qwen
-fusions (`sm70_qwen_fusions`, HC mix/gate, dense GEMV, small GEMM) and the
-greedy TP top-1 logits path.
-They are written against the fork's Qwen3.8 model code, which upstream's
-`qwen4_exp.py` restructured, and need a V100 to re-tune. Without them the
-model runs on the generic SM70 kernels, slower than the fork's 108-119 tok/s
-MTP decode.
+Ported from the fork's decode-speed work: the NVFP4 MoE decode kernel and its
+top-10 router (`kernels/ops/moe/sm70_nvfp4_moe_decode.py`; the fork's CUDA
+source, only clang-formatted). At the TP4 decode shape (at most 4 tokens, 512 experts, top-10,
+hidden 2560, expert slice 160) the Marlin runner and `fused_topk` use them in
+place of Marlin and the Triton router; anything else, or a failed build, stays
+on those. They read the Marlin-repacked weights and SM70 scale bytes that
+upstream's prep produces, which match the fork's for FP16 (same marlin_v100
+pin and repack, same scale encoding, a scale factor of 1). The extension builds
+at first use under `SGLANG_V100_DECODE_CUDA_BUILD_DIR/nvfp4_moe`;
+`SGLANG_V100_NVFP4_MOE_DECODE=0` turns it off.
+
+Not ported yet: the fork's per-shape Marlin geometry, the SM70 Qwen fusions
+(`sm70_qwen_fusions`, HC mix/gate, dense GEMV, small GEMM) and the greedy TP
+top-1 logits path. They are written against the fork's Qwen3.8 model code,
+which upstream's `qwen4_exp.py` restructured. On a 4x V100 PCIe server,
+upstream without any of the fork's decode work ran Qwen3.8 Flash Next at about
+38 tok/s with MTP (accept length 3.05), against about 70 on the fork's image.
 
 ## Verification status
 
@@ -428,6 +437,11 @@ Done without V100 hardware:
   CPU at Qwen3.8 Flash Next TP4 shapes (512 experts) with stubbed kernels, the
   repack holds memory flat across layers. No NVFP4 checkpoint has completed
   loading on a V100 with this change yet.
+- NVFP4 MoE decode kernel: all seven kernels compile for `sm_70` with
+  PyTorch's extension flags (nvcc 12.8, no spills). `test_sm70_marlin_v100.py`
+  pins the scale bytes against the kernel's reader for every E4M3 code, and
+  the gates that keep every other shape and MoE variant on Marlin. It has not
+  run on a V100 in this tree.
 - Step 6: in the Triton interpreter, FP16-state chain verify equals T
   sequential decodes bit for bit (23.6% of outputs differ without the reload),
   and the SM70 BV=8 verify launch equals BV=32
