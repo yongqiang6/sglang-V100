@@ -222,6 +222,9 @@ if HAS_TILELANG:
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            # Each (qi, n) writes its own column; TileLang 0.1.12's race check
+            # does not see that `column` depends on `n`. Same generated code.
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
         }
     )
     def _tilelang_qsa_mqa_prefill_relative_kernel(
@@ -323,6 +326,9 @@ if HAS_TILELANG:
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            # Each token writes its own position; TileLang 0.1.12's race check
+            # does not see that `position` depends on `token`. Same generated code.
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
         }
     )
     def _tilelang_qsa_mqa_decode_kernel(

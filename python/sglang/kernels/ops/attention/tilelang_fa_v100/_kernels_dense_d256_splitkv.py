@@ -18,6 +18,14 @@ _THREADS = 256
 _DEFAULT_SPLITS = 3
 
 
+# Each row writes its own query row; TileLang 0.1.12's race check does not see
+# that query_row derives from `row`. The generated code is unchanged.
+_COMBINE_PASS_CONFIGS = {
+    **_D256_PASS_CONFIGS,
+    tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+}
+
+
 @tilelang.jit(out_idx=[5, 6, 7], pass_configs=_D256_PASS_CONFIGS)
 def _dense_prefix_d256_splitkv_partial(heads, heads_kv, splits):
     dim = 256
@@ -144,7 +152,7 @@ def _dense_prefix_d256_splitkv_partial(heads, heads_kv, splits):
     return main
 
 
-@tilelang.jit(out_idx=[4], pass_configs=_D256_PASS_CONFIGS)
+@tilelang.jit(out_idx=[4], pass_configs=_COMBINE_PASS_CONFIGS)
 def _dense_prefix_d256_splitkv_merge(heads, splits):
     dim = 256
     nt = T.dynamic("nt")

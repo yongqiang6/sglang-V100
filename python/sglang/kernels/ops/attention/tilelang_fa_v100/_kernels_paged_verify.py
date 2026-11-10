@@ -19,6 +19,13 @@ from sglang.srt.environ import envs
 
 from ._kernels_paged import pass_configs
 
+# Each row writes its own (query, head) slot; TileLang 0.1.12's race check does
+# not see that q_i and q_head_i derive from `row`. The generated code is unchanged.
+_PARTIAL_PASS_CONFIGS = {
+    **pass_configs,
+    tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+}
+
 VERIFY_Q_BLOCK = 16
 # A TP4 Qwen3.8 verifier rank has one KV head and only two grouped-GQA CTAs.
 # Keep the context slices small enough to expose useful SM-level parallelism
@@ -41,7 +48,7 @@ def _verify_min_tokens_per_split():
     return value
 
 
-@tilelang.jit(out_idx=[-2, -1], pass_configs=pass_configs)
+@tilelang.jit(out_idx=[-2, -1], pass_configs=_PARTIAL_PASS_CONFIGS)
 def _paged_verify_partial_kernel(
     batch,
     heads,
