@@ -589,3 +589,25 @@ register_kernel(
         capabilities=CUDA_ONLY,
     )
 )
+
+# V100 (SM70) decode / MTP-verify projections and Qwen3.8 fusions.
+_SM70_ONLY = frozenset({CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))})
+for _op, _target in (
+    ("sm70_dense_linear", "sm70_dense_gemv:linear"),
+    ("sm70_hc_mix_down", "sm70_hc_mix:hc_down"),
+    ("sm70_hc_mix_up", "sm70_hc_mix:hc_up"),
+    ("sm70_hc_mix_down_with_gate", "sm70_hc_mix:hc_down_with_gate"),
+    ("sm70_hc_apply_gate", "sm70_hc_mix:hc_apply_gate"),
+    ("sm70_qwen_gate_up", "sm70_qwen_fusions:gate_up"),
+    ("sm70_qwen_qkv_ba", "sm70_qwen_fusions:qkv_ba"),
+    ("sm70_qwen_qkvzba", "sm70_qwen_fusions:qkvzba"),
+):
+    register_kernel(
+        KernelSpec(
+            op=f"gemm.{_op}",
+            backend=KernelBackend.JIT,
+            target=f"sglang.kernels.ops.gemm.{_target}",
+            capabilities=_SM70_ONLY,
+        )
+    )
+del _op, _target

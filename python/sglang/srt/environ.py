@@ -1262,6 +1262,11 @@ class Envs:
     # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape (M <= 4);
     # built under SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
     SGLANG_V100_NVFP4_MOE_DECODE = EnvBool(True)
+    # SM70 FP16 GEMV / two-four-row GEMM for decode and MTP verify projections.
+    SGLANG_SM70_DENSE_GEMV = EnvBool(True)
+    # SM70 Qwen3.8 decode fusions: HC mix and inject gates, GDN and shared-expert
+    # projections, FP16 PLE gate/value.
+    SGLANG_SM70_QWEN_FUSIONS = EnvBool(True)
     SGLANG_SM70_QSA_COMBINE = EnvBool(True)
     # QSA (Qwen3.8 Flash Next): prefix-free prefills up to this many tokens, and
     # decode when the context limit fits it, run dense attention; 0 disables.

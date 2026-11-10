@@ -93,6 +93,18 @@ def _aiter_lm_head_ok(hidden_states: torch.Tensor, weight: torch.Tensor) -> bool
     )
 
 
+def _sm70_lm_head_ok(hidden_states: torch.Tensor, weight: torch.Tensor) -> bool:
+    if not (
+        hidden_states.is_cuda
+        and hidden_states.dtype == weight.dtype == torch.float16
+        and not torch.compiler.is_compiling()
+    ):
+        return False
+    from sglang.kernels.ops.gemm.sm70_dense_gemv import supported
+
+    return supported(hidden_states, weight)
+
+
 _UNQUANTIZED_LM_HEAD_METHODS = {
     "UnquantizedEmbeddingMethod",
     "UnquantizedLinearMethod",
@@ -1249,6 +1261,10 @@ class LogitsProcessor(nn.Module):
                 )
             elif _aiter_lm_head_ok(hidden_states, lm_head.weight):
                 logits = tgemm.mm(hidden_states, lm_head.weight)
+            elif _sm70_lm_head_ok(hidden_states, lm_head.weight):
+                from sglang.kernels.ops.gemm.sm70_dense_gemv import linear
+
+                logits = linear(hidden_states, lm_head.weight)
             else:
                 logits = torch.matmul(
                     hidden_states.to(lm_head.weight.dtype), lm_head.weight.T

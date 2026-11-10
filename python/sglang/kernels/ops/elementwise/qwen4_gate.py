@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from sglang.kernels.numerics import round_bf16_to_fp32
 
@@ -25,14 +26,27 @@ def _qwen4_gate_value_kernel(
     hidden = tl.arange(0, BLOCK_SIZE)
     mask = (token < num_tokens) & (hidden < HIDDEN_SIZE)
 
-    # `gate` arrives already rounded to bf16 by the eager multiply/reduce/divide;
-    # every remaining eager bf16 rounding boundary is reproduced below.
+    # `gate` arrives already rounded by the eager multiply/reduce/divide; every
+    # remaining eager rounding boundary of its dtype is reproduced below.
     gate = tl.load(gate_ptr + token_group).to(tl.float32)
     magnitude = tl.maximum(tl.abs(gate), 1.0e-6)
-    root = round_bf16_to_fp32(tl.sqrt(magnitude))
-    sign = tl.where(gate > 0.0, 1.0, tl.where(gate < 0.0, -1.0, 0.0))
-    transformed = round_bf16_to_fp32(root * sign)
-    activated = round_bf16_to_fp32(tl.sigmoid(transformed))
+    if gate_ptr.dtype.element_ty == tl.float16:
+        # FP16 (V100): eager clamp_min also rounds, and an approximate
+        # reciprocal or exp can cross an FP16 midpoint for small gates.
+        magnitude = magnitude.to(tl.float16).to(tl.float32)
+        root = tl.sqrt(magnitude).to(tl.float16).to(tl.float32)
+        sign = tl.where(gate > 0.0, 1.0, tl.where(gate < 0.0, -1.0, 0.0))
+        transformed = (root * sign).to(tl.float16).to(tl.float32)
+        activated = (
+            tl.div_rn(1.0, 1.0 + libdevice.exp(-transformed))
+            .to(tl.float16)
+            .to(tl.float32)
+        )
+    else:
+        root = round_bf16_to_fp32(tl.sqrt(magnitude))
+        sign = tl.where(gate > 0.0, 1.0, tl.where(gate < 0.0, -1.0, 0.0))
+        transformed = round_bf16_to_fp32(root * sign)
+        activated = round_bf16_to_fp32(tl.sigmoid(transformed))
 
     value = tl.load(value_ptr + token * HIDDEN_SIZE + hidden, mask=mask, other=0.0).to(
         tl.float32
@@ -41,12 +55,23 @@ def _qwen4_gate_value_kernel(
     tl.store(output_ptr + output_offset, activated * value, mask=mask)
 
 
+def _sm70_fp16_gate_enabled(gate: torch.Tensor) -> bool:
+    from sglang.kernels.ops.gemm.sm70_dense_gemv import is_sm70
+    from sglang.srt.environ import envs
+
+    return envs.SGLANG_SM70_QWEN_FUSIONS.get() and is_sm70(gate.device)
+
+
 def can_fuse_qwen4_gate_value(gate: torch.Tensor, value: torch.Tensor) -> bool:
-    """Return whether inputs match Qwen4's fixed BF16 gate/value contract."""
+    """Return whether inputs match Qwen4's fixed gate/value contract: BF16, or
+    FP16 on V100."""
 
     return (
         gate.is_cuda
-        and gate.dtype == torch.bfloat16
+        and (
+            gate.dtype == torch.bfloat16
+            or (gate.dtype == torch.float16 and _sm70_fp16_gate_enabled(gate))
+        )
         and gate.dim() == 3
         and gate.shape[1:] == (_QWEN4_HC_COUNT, 1)
         and gate.is_contiguous()

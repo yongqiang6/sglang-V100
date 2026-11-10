@@ -13,7 +13,7 @@ what still needs a V100 to validate.
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ/FP8; TurboMind FP16 MoE, block-FP8 W8A16 and AWQ W4A16; QPN8 FP8 decode | Done |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Done (TileLang native verify not ported) |
-| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (NVFP4 MoE decode kernel ported; Qwen3.8 GEMV/HC fusions not ported) |
+| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (fork decode kernels ported; Marlin geometry and top-1 logits not ported) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -392,12 +392,33 @@ pin and repack, same scale encoding, a scale factor of 1). The extension builds
 at first use under `SGLANG_V100_DECODE_CUDA_BUILD_DIR/nvfp4_moe`;
 `SGLANG_V100_NVFP4_MOE_DECODE=0` turns it off.
 
-Not ported yet: the fork's per-shape Marlin geometry, the SM70 Qwen fusions
-(`sm70_qwen_fusions`, HC mix/gate, dense GEMV, small GEMM) and the greedy TP
-top-1 logits path. They are written against the fork's Qwen3.8 model code,
-which upstream's `qwen4_exp.py` restructured. On a 4x V100 PCIe server,
-upstream without any of the fork's decode work ran Qwen3.8 Flash Next at about
-38 tok/s with MTP (accept length 3.05), against about 70 on the fork's image.
+Also ported, with the fork's CUDA sources (clang-formatted only) behind new
+hooks in upstream's restructured code:
+
+- Dense GEMV and few-row GEMM (`kernels/ops/gemm/sm70_dense_gemv.py`): FP16
+  projections at one row, and at two or four rows for MTP verify, for the
+  fork's measured TP4 shapes (attention and GDN projections, shared expert,
+  router, LM head shard). `UnquantizedLinearMethod` and the LM head take them
+  for bias-free, aligned inputs; other shapes stay on cuBLAS.
+  `SGLANG_SM70_DENSE_GEMV=0` turns them off.
+- Hyper-connection mix (`sm70_hc_mix.py`): down projection with SiLU, then an
+  up projection fusing sigmoid, multiply and the stream mean, in place of the
+  persistent Triton mix, which is pathologically slow on SM70. At two and four
+  rows the down projection also computes the combine's inject-gate partials.
+- Qwen projections (`sm70_qwen_fusions.py`): the shared expert's gate_up with
+  SiLU-and-mul, the GDN qkvz + ba projections in one launch at decode, and at
+  MTP verify both projections written straight into the split GDN inputs.
+- The PLE gate/value kernel's FP16 branch, which reproduces eager FP16
+  rounding, on SM70 only (BF16 code generation is unchanged).
+
+`SGLANG_SM70_QWEN_FUSIONS=0` turns off the last three. Left out on purpose:
+the fork's shared-expert gate kernel (upstream fuses that gate already) and
+its GDN QKV-prefix reuse (upstream's fused ratio-three split replaces it).
+Not ported yet: the fork's per-shape Marlin geometry and its greedy TP top-1
+logits path. On a 4x V100 PCIe server, upstream without any of the fork's
+decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
+3.05), against about 70 on the fork's image; this tree with the ported kernels
+has not been measured yet.
 
 ## Verification status
 
@@ -442,6 +463,11 @@ Done without V100 hardware:
   pins the scale bytes against the kernel's reader for every E4M3 code, and
   the gates that keep every other shape and MoE variant on Marlin. It has not
   run on a V100 in this tree.
+- Decode GEMV and Qwen fusions: all 23 kernel instantiations build for `sm_70`
+  through the JIT loader, and the FP16 PLE branch compiles for `sm_70` (its
+  BF16 PTX is identical to before). `test_sm70_decode_fusions.py` pins each
+  gate's refusals and the routing of SM70 inject-gate partials. Not run on a
+  V100 in this tree.
 - Step 6: in the Triton interpreter, FP16-state chain verify equals T
   sequential decodes bit for bit (23.6% of outputs differ without the reload),
   and the SM70 BV=8 verify launch equals BV=32

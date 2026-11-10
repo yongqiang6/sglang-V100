@@ -74,6 +74,7 @@ from sglang.srt.layers.moe.utils import (
     uses_per_rank_fused_shared_slots,
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
@@ -238,10 +239,34 @@ class Qwen2MoeMLP(nn.Module):
         y_sf = y_sf.view(torch.uint8).permute(2, 4, 0, 1, 3, 5).reshape(m_padded, -1)
         return y_fp4, y_sf
 
+    def _sm70_gate_up_silu(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """V100 one-row shared expert: gate_up projection fused with SiLU-and-mul."""
+        proj = self.gate_up_proj
+        # Exact types: a LoRA wrapper would lose its adapters here.
+        if not (
+            _is_cuda
+            and x.dtype == torch.float16
+            and type(proj) is MergedColumnParallelLinear
+            and type(proj.quant_method) is UnquantizedLinearMethod
+            and proj.bias is None
+            and not proj.gather_output
+            and not torch.compiler.is_compiling()
+        ):
+            return None
+        from sglang.kernels.ops.gemm import sm70_qwen_fusions
+
+        if not sm70_qwen_fusions.gate_up_supported(x, proj.weight):
+            return None
+        return sm70_qwen_fusions.gate_up(x, proj.weight)
+
     def forward(
         self,
         x,
     ):
+        activated = self._sm70_gate_up_silu(x)
+        if activated is not None:
+            x, _ = self.down_proj(activated)
+            return x
         gate_up, _ = self.gate_up_proj(x)
         if self._enable_silu_fp4_quant_fusion and not isinstance(gate_up, tuple):
             x, _ = self.down_proj(self._silu_fp4_quant_fused(gate_up))

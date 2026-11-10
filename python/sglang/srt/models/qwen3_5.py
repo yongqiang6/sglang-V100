@@ -832,7 +832,60 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             )
         )
 
+    def _sm70_input_proj_weights(
+        self, hidden_states
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """The FP16 qkvz and ba weights when V100 may fuse both projections."""
+        qkvz, ba = self.in_proj_qkvz, self.in_proj_ba
+        # Exact types: a LoRA wrapper would lose its adapters here.
+        if not (
+            _is_cuda
+            and isinstance(hidden_states, torch.Tensor)
+            and hidden_states.dtype == torch.float16
+            and type(qkvz) is MergedColumnParallelLinear
+            and type(ba) is MergedColumnParallelLinear
+            and type(qkvz.quant_method) is UnquantizedLinearMethod
+            and type(ba.quant_method) is UnquantizedLinearMethod
+            and qkvz.bias is None
+            and ba.bias is None
+            and not qkvz.gather_output
+            and not ba.gather_output
+            and not torch.compiler.is_compiling()
+        ):
+            return None
+        return qkvz.weight, ba.weight
+
+    def _sm70_verify_split(self, hidden_states, forward_batch: ForwardBatch):
+        """V100 MTP verify: both projections written straight into the split
+        (mixed_qkv, z, b, a) inputs of a ratio-three layer, or None."""
+        if not (
+            forward_batch.forward_mode.is_target_verify()
+            and (
+                self.key_dim // self.attn_tp_size,
+                self.value_dim // self.attn_tp_size,
+                self.num_v_heads // self.attn_tp_size,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+            == (512, 1536, 12, 128, 128)
+        ):
+            return None
+        weights = self._sm70_input_proj_weights(hidden_states)
+        if weights is None:
+            return None
+        from sglang.kernels.ops.gemm import sm70_qwen_fusions
+
+        if not sm70_qwen_fusions.qkvzba_supported(hidden_states, *weights):
+            return None
+        return sm70_qwen_fusions.qkvzba(hidden_states, *weights)
+
     def _forward_input_proj(self, hidden_states: torch.Tensor):
+        sm70_weights = self._sm70_input_proj_weights(hidden_states)
+        if sm70_weights is not None:
+            from sglang.kernels.ops.gemm import sm70_qwen_fusions
+
+            if sm70_qwen_fusions.qkv_ba_supported(hidden_states, *sm70_weights):
+                return sm70_qwen_fusions.qkv_ba(hidden_states, *sm70_weights)
         if _use_aiter and self._fused_in_proj_weight is not None:
             # Unquantized BF16 projections consume the bf16 side of the fused
             # AR+RMSNorm tuple; one aiter GEMM replaces the two separate
@@ -1008,9 +1061,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         2. Core attention (custom op)
         3. Output projection
         """
-        projected_states_qkvz, projected_states_ba = self._forward_input_proj(
-            hidden_states
-        )
+        sm70_split = self._sm70_verify_split(hidden_states, forward_batch)
+        if sm70_split is None:
+            projected_states_qkvz, projected_states_ba = self._forward_input_proj(
+                hidden_states
+            )
+        else:
+            projected_states_qkvz = projected_states_ba = None
 
         if _is_xpu and get_exec().mamba.linear_attn_backend == "intel_xpu":
             from sglang.srt.model_executor.forward_context import get_attn_backend
@@ -1046,6 +1103,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             z = None
             b = projected_states_ba
             a = projected_states_ba
+        elif sm70_split is not None:
+            mixed_qkv, z, b, a = sm70_split
         elif use_fused_contiguous_unpack:
             if _is_cpu:
                 num_k_heads_tp = self.num_k_heads // self.attn_tp_size

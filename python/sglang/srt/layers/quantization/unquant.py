@@ -751,6 +751,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 return bf16_gemm_dispatch(x, layer.weight, bias)
             return _bf16_gemm_dispatch_impl(x, layer.weight, bias)
 
+        elif (
+            _is_cuda and x.dtype == torch.float16 and not torch.compiler.is_compiling()
+        ):
+            from sglang.kernels.ops.gemm import sm70_dense_gemv
+
+            if sm70_dense_gemv.supported(x, layer.weight, bias):
+                return sm70_dense_gemv.linear(x, layer.weight)
+
         return F.linear(x, layer.weight, bias)
 
     def apply_with_addend(

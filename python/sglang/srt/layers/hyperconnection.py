@@ -175,6 +175,18 @@ class GatedResidual(HyperConnectionBase):
             self._mix_flydsl_weight_key = None
 
         self._gate_stream = None
+        # V100: native mix kernels at decode/verify rows; with a split combine,
+        # mix() also returns the inject-gate partials that combine() consumes.
+        self._sm70_mix = (
+            use_mix
+            and self.hc_count == 4
+            and self.hidden_size == 2560
+            and config.hc_lowrank == 320
+            and config.params_dtype == torch.float16
+            and torch.cuda.is_available()
+            and torch.cuda.get_device_capability() == (7, 0)
+        )
+        self._sm70_inject_gate = False
         if use_combine:
             self.block_inject_weight = nn.Linear(
                 self.hidden_size * self.hc_count,
@@ -193,6 +205,7 @@ class GatedResidual(HyperConnectionBase):
                 and vecs % (8 * 160) == 0
                 and (self.hidden_size // 8) % (vecs // 8) == 0
             )
+            self._sm70_inject_gate = self._sm70_mix and self._split_combine_ok
             if (
                 self.hc_count == 4
                 and self.hidden_size == 2560
@@ -242,6 +255,42 @@ class GatedResidual(HyperConnectionBase):
         self._mix_compute = torch.compile(_mix_compute)
         self._combine_compute = torch.compile(_combine_compute)
 
+    def _sm70_mix_supported(self, hyper_input_normed: torch.Tensor) -> bool:
+        if torch.compiler.is_compiling():
+            return False
+        from sglang.kernels.ops.gemm import sm70_hc_mix
+
+        return sm70_hc_mix.mix_supported(
+            hyper_input_normed,
+            self.input_mix_weight_down.weight,
+            self.input_mix_weight_up.weight,
+        )
+
+    def _sm70_mix_forward(
+        self, hyper_input_normed: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """The mixed input, and the inject-gate partials when combine() can
+        take them (two or four rows)."""
+        from sglang.kernels.ops.gemm import sm70_hc_mix
+
+        partials = None
+        if self._sm70_inject_gate and sm70_hc_mix.gate_supported(
+            hyper_input_normed, self.block_inject_weight.weight
+        ):
+            activated, partials = sm70_hc_mix.hc_down_with_gate(
+                hyper_input_normed,
+                self.input_mix_weight_down.weight,
+                self.block_inject_weight.weight,
+            )
+        else:
+            activated = sm70_hc_mix.hc_down(
+                hyper_input_normed, self.input_mix_weight_down.weight
+            )
+        mixed_input = sm70_hc_mix.hc_up(
+            activated, hyper_input_normed, self.input_mix_weight_up.weight
+        )
+        return mixed_input, partials
+
     def _flydsl_mix_ok(self) -> bool:
         if self._mix_flydsl_ok is None:
             self._mix_flydsl_ok = flydsl_hc_mix_weights_supported(
@@ -273,7 +322,10 @@ class GatedResidual(HyperConnectionBase):
             hyper_input_normed = self.hc_norm(
                 hyper_input.unflatten(-1, (self.hc_count, self.hidden_size))
             ).flatten(-2)
-        if (
+        partials = None
+        if self._sm70_mix and self._sm70_mix_supported(hyper_input_normed):
+            mixed_input, partials = self._sm70_mix_forward(hyper_input_normed)
+        elif (
             self._jit_mix_ok
             and hyper_input_normed.is_cuda
             and hyper_input_normed.dtype in (torch.bfloat16, torch.float16)
@@ -327,7 +379,6 @@ class GatedResidual(HyperConnectionBase):
                 self.hc_count,
                 self.hidden_size,
             ).to(self.params_dtype)
-        partials = None
         stream = self._gate_stream
         if (
             stream is not None
@@ -386,6 +437,11 @@ class GatedResidual(HyperConnectionBase):
         residuals: tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
     ) -> torch.Tensor:
         hyper_input, hyper_input_normed, partials = residuals
+        if partials is not None and self._gate_stream is None:
+            # Only the SM70 mix produces partials without a gate stream.
+            from sglang.kernels.ops.gemm.sm70_hc_mix import hc_apply_gate
+
+            return hc_apply_gate(block_output.contiguous(), hyper_input, partials)
         if partials is not None:
             from sglang.kernels.ops.elementwise.hc_combine_decode import (
                 hc_combine_apply,
