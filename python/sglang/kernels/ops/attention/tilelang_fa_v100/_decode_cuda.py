@@ -30,6 +30,8 @@ _OPS_LOAD_ATTEMPTED = False
 PAGE_SIZE = 16  # fixed page granularity supported by the CUDA kernel
 QSA_DECODE_TARGET_CTAS = 160
 QSA_DECODE_TOKENS_PER_SPLIT = 32
+# The batch bound in sm70_qsa_combine.cuh: one MTP verify step's rows.
+_NATIVE_COMBINE_MAX_BATCH = 7
 
 
 def sm70_cuda_decode_enabled() -> bool:
@@ -198,7 +200,7 @@ def sm70_cuda_qsa_decode(
         partial_lse,
     )
     if (
-        1 <= batch <= 4
+        1 <= batch <= _NATIVE_COMBINE_MAX_BATCH
         and heads == 6
         and dim == 256
         and max_splits <= 160

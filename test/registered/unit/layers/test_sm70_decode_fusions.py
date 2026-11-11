@@ -3,6 +3,7 @@ opt-in greedy TP top-1 exchange. Each fast path hard-codes one layout or skips
 work other consumers need, so the gates must refuse every input it would
 compute wrongly."""
 
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -55,6 +56,14 @@ class TestSm70DecodeFusionGates(CustomTestCase):
             self.assertTrue(sm70_dense_gemv.supported(x1, _CudaTensor(4096, 2560)))
             self.assertTrue(sm70_dense_gemv.supported(x1, _CudaTensor(62080, 2560)))
             self.assertTrue(sm70_dense_gemv.supported(x4, _CudaTensor(320, 2560)))
+            # Longer MTP chains verify up to seven rows on the four-row launch.
+            for rows in (3, 5, 6, 7):
+                self.assertTrue(
+                    sm70_dense_gemv.supported(
+                        _CudaTensor(rows, 2560), _CudaTensor(320, 2560)
+                    ),
+                    rows,
+                )
             rejected = {
                 "bias": sm70_dense_gemv.supported(
                     x1, _CudaTensor(4096, 2560), bias=_CudaTensor(4096)
@@ -69,8 +78,12 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 "strided input": sm70_dense_gemv.supported(
                     _CudaTensor(4, 2560, contiguous=False), _CudaTensor(320, 2560)
                 ),
-                "three rows": sm70_dense_gemv.supported(
-                    _CudaTensor(3, 2560), _CudaTensor(320, 2560)
+                "eight rows": sm70_dense_gemv.supported(
+                    _CudaTensor(8, 2560), _CudaTensor(320, 2560)
+                ),
+                # Only four-row shapes extend to the other row counts.
+                "five rows of a two-row shape": sm70_dense_gemv.supported(
+                    _CudaTensor(5, 2560), _CudaTensor(1, 2560)
                 ),
                 "unmeasured shape": sm70_dense_gemv.supported(
                     x1, _CudaTensor(1000, 2560)
@@ -96,6 +109,13 @@ class TestSm70DecodeFusionGates(CustomTestCase):
         with _on_sm70():
             self.assertTrue(sm70_hc_mix.mix_supported(_CudaTensor(1, 10240), down, up))
             self.assertTrue(sm70_hc_mix.mix_supported(_CudaTensor(4, 10240), down, up))
+            self.assertTrue(sm70_hc_mix.mix_supported(_CudaTensor(7, 10240), down, up))
+            self.assertTrue(
+                sm70_hc_mix.gate_supported(_CudaTensor(7, 10240), _CudaTensor(4, 10240))
+            )
+            self.assertTrue(
+                sm70_qwen_fusions.qkvzba_supported(_CudaTensor(7, 2560), qkvz, ba)
+            )
             self.assertTrue(
                 sm70_hc_mix.gate_supported(_CudaTensor(2, 10240), _CudaTensor(4, 10240))
             )
@@ -111,8 +131,14 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 )
             )
             rejected = {
-                "hc three rows": sm70_hc_mix.mix_supported(
-                    _CudaTensor(3, 10240), down, up
+                "hc eight rows": sm70_hc_mix.mix_supported(
+                    _CudaTensor(8, 10240), down, up
+                ),
+                "hc gate eight rows": sm70_hc_mix.gate_supported(
+                    _CudaTensor(8, 10240), _CudaTensor(4, 10240)
+                ),
+                "qkvzba eight rows": sm70_qwen_fusions.qkvzba_supported(
+                    _CudaTensor(8, 2560), qkvz, ba
                 ),
                 # One row's combine computes its own gates.
                 "hc gate one row": sm70_hc_mix.gate_supported(
@@ -137,6 +163,60 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 )
         for label, accepted in rejected.items():
             self.assertFalse(accepted, label)
+
+    def test_row_bounds_match_the_compiled_kernels(self):
+        """Each kernel asserts its own row bound when it is built on a V100, so
+        a Python gate that admits more rows fails there and nowhere else."""
+        from sglang.kernels.jit.utils import KERNEL_PATH
+        from sglang.kernels.ops.attention.tilelang_fa_v100 import _decode_cuda
+        from sglang.kernels.ops.moe import sm70_nvfp4_moe_decode
+
+        def bounds(relative_path, pattern):
+            source = (KERNEL_PATH / "csrc" / relative_path).read_text()
+            found = {int(bound) for bound in re.findall(pattern, source)}
+            self.assertTrue(found, relative_path)
+            return found
+
+        rows = {sm70_dense_gemv.MAX_VERIFY_ROWS}
+        for path in (
+            "gemm/sm70_small_gemm.cuh",
+            "gemm/sm70_qwen_gdn.cuh",
+            "elementwise/sm70_hc_batch.cuh",
+            "elementwise/sm70_hc_gate.cuh",
+        ):
+            self.assertEqual(bounds(path, r"M <= (\d+)\);"), rows, path)
+        self.assertEqual(
+            bounds("elementwise/sm70_hc_gate.cuh", r"rows\.unwrap\(\) <= (\d+)"), rows
+        )
+        self.assertEqual(
+            bounds("moe/sm70_nvfp4_moe_decode.cu", r"kMaxTokens = (\d+);"),
+            {sm70_nvfp4_moe_decode.MAX_TOKENS},
+        )
+        self.assertEqual(
+            bounds("attention/sm70_qsa_combine.cuh", r"batch\.unwrap\(\) <= (\d+)"),
+            {_decode_cuda._NATIVE_COMBINE_MAX_BATCH},
+        )
+
+    def test_gdn_verify_small_value_tile_covers_every_mtp_chain_length(self):
+        """The 48-CTA default launch is the slow one on V100, so each supported
+        MTP chain length must select the 192-CTA tile, and nothing else may."""
+        from sglang.kernels.ops.attention.linear import (
+            fused_sigmoid_gating_recurrent as recurrent,
+        )
+
+        def launch(steps, n=1, verify=True):
+            return recurrent._select_recurrent_launch_config(
+                n, 4, 12, 128, 128, False, verify, cache_steps=steps
+            )
+
+        with patch.object(recurrent, "_is_sm70", True):
+            for steps in range(2, sm70_dense_gemv.MAX_VERIFY_ROWS + 1):
+                self.assertEqual(launch(steps), (8, 1), steps)
+            self.assertEqual(launch(8), (32, 1))
+            self.assertEqual(launch(4, n=2), (32, 1))
+            self.assertEqual(launch(4, verify=False), (32, 1))
+        with patch.object(recurrent, "_is_sm70", False):
+            self.assertEqual(launch(4), (32, 1))
 
     def test_fp16_ple_gate_value_fuses_only_on_sm70(self):
         """The FP16 rounding branch of the PLE gate/value kernel matches eager

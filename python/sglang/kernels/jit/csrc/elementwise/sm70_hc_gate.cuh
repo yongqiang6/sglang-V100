@@ -12,7 +12,7 @@ void down(
     tvm::ffi::TensorView inject,
     tvm::ffi::TensorView o,
     tvm::ffi::TensorView partials) {
-  static_assert(M == 2 || M == 4);
+  static_assert(M >= 2 && M <= 7);
   using namespace host;
   auto dev = SymbolicDevice{};
   dev.set_options<kDLCUDA>();
@@ -43,7 +43,7 @@ void apply(
   TensorMatcher({rows, 2560}).with_dtype<half>().with_device(dev).verify(y);
   TensorMatcher({rows, 10240}).with_dtype<half>().with_device(dev).verify(residual).verify(output);
   TensorMatcher({rows, 8, 4}).with_dtype<float>().with_device(dev).verify(partials);
-  RuntimeCheck(rows.unwrap() == 2 || rows.unwrap() == 4, "Expected two or four rows");
+  RuntimeCheck(rows.unwrap() >= 2 && rows.unwrap() <= 7, "Expected two to seven rows");
   RuntimeCheck(
       reinterpret_cast<uintptr_t>(y.data_ptr()) % 16 == 0 &&
           reinterpret_cast<uintptr_t>(residual.data_ptr()) % 16 == 0 &&

@@ -121,7 +121,7 @@ up(const half* __restrict__ a, const half* __restrict__ x, const half* __restric
 }
 template <int M>
 void down_run(tvm::ffi::TensorView x, tvm::ffi::TensorView w, tvm::ffi::TensorView o) {
-  static_assert(M == 2 || M == 4);
+  static_assert(M >= 2 && M <= 7);
   using namespace host;
   auto dev = SymbolicDevice{};
   dev.set_options<kDLCUDA>();
@@ -141,7 +141,7 @@ void down_run(tvm::ffi::TensorView x, tvm::ffi::TensorView w, tvm::ffi::TensorVi
 }
 template <int M>
 void up_run(tvm::ffi::TensorView a, tvm::ffi::TensorView x, tvm::ffi::TensorView w, tvm::ffi::TensorView o) {
-  static_assert(M == 2 || M == 4);
+  static_assert(M >= 2 && M <= 7);
   using namespace host;
   auto dev = SymbolicDevice{};
   dev.set_options<kDLCUDA>();

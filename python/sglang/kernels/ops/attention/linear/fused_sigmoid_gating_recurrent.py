@@ -82,10 +82,11 @@ def _select_recurrent_launch_config(
         and target_verify
         and not is_kda
         and (n, h, hv, k, v) == (1, 4, 12, 128, 128)
-        and cache_steps in (2, 4)
+        and 2 <= cache_steps <= 7
     ):
         # Qwen3.6-27B TP4 MTP verify on V100: BV=32 takes 254 registers/thread and
         # launches 48 CTAs; BV=8 launches 192 with the same per-key reduction.
+        # Measured at two and four steps; five to seven use the same launch.
         return 8, 1
     if _is_sm107 and is_kda and target_verify:
         # KDA spec verify on SM107: the default BV=32 single-warp launch gives

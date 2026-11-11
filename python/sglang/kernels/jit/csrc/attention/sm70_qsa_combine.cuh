@@ -74,7 +74,7 @@ inline void combine(
   TensorMatcher({batch}).with_dtype<int>().with_device(device).verify(lengths);
   TensorMatcher({batch, 6, 256}).with_dtype<half>().with_device(device).verify(out);
   RuntimeCheck(
-      batch.unwrap() >= 1 && batch.unwrap() <= 4 && splits.unwrap() >= 1 && splits.unwrap() <= 160,
+      batch.unwrap() >= 1 && batch.unwrap() <= 7 && splits.unwrap() >= 1 && splits.unwrap() <= 160,
       "Unsupported QSA combine shape");
   RuntimeCheck(selected_tokens > 0 && tokens_per_split > 0, "Invalid QSA split sizes");
   LaunchKernel(dim3(16, 6, batch.unwrap()), 128, device.unwrap())(

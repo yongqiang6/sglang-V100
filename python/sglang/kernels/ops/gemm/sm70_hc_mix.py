@@ -1,11 +1,11 @@
 """Hyper-connection mix and inject gates for V100 (SM70) decode and MTP verify.
 
 From the sglang-V100 fork, for Qwen3.8 Flash Next's FP16 shape (4 streams of
-2560, low rank 320) at one, two or four rows. The persistent Triton mix is
+2560, low rank 320) at one to seven rows. The persistent Triton mix is
 pathologically slow on SM70; these kernels split it into a down projection with
 SiLU and an up projection that fuses sigmoid, multiply and the stream mean,
-keeping the eager FP16 rounding points. At two and four rows the down
-projection also computes the combine's inject-gate partial dots.
+keeping the eager FP16 rounding points. From two rows up the down projection
+also computes the combine's inject-gate partial dots.
 """
 
 from __future__ import annotations
@@ -13,7 +13,11 @@ from __future__ import annotations
 import torch
 
 from sglang.kernels.jit.utils import cache_once, load_jit
-from sglang.kernels.ops.gemm.sm70_dense_gemv import is_aligned_fp16, is_sm70
+from sglang.kernels.ops.gemm.sm70_dense_gemv import (
+    MAX_VERIFY_ROWS,
+    is_aligned_fp16,
+    is_sm70,
+)
 from sglang.srt.environ import envs
 
 HC_COUNT = 4
@@ -31,7 +35,7 @@ def mix_supported(
         envs.SGLANG_SM70_QWEN_FUSIONS.get()
         and x.is_cuda
         and x.ndim == 2
-        and x.shape[0] in (1, 2, 4)
+        and 1 <= x.shape[0] <= MAX_VERIFY_ROWS
         and x.shape[1] == _ROW_SIZE
         and tuple(weight_down.shape) == (LOWRANK, _ROW_SIZE)
         and tuple(weight_up.shape) == (_ROW_SIZE, LOWRANK)
@@ -46,7 +50,7 @@ def gate_supported(x: torch.Tensor, inject_weight: torch.Tensor) -> bool:
     """Whether the down projection can also produce the inject-gate partials;
     the caller has already checked ``mix_supported``."""
     return (
-        x.shape[0] in (2, 4)
+        2 <= x.shape[0] <= MAX_VERIFY_ROWS
         and tuple(inject_weight.shape) == (HC_COUNT, _ROW_SIZE)
         and inject_weight.device == x.device
         and is_aligned_fp16(inject_weight)

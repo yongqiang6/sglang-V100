@@ -29,7 +29,8 @@ NUM_EXPERTS = 512
 TOP_K = 10
 HIDDEN_SIZE = 2560
 INTERMEDIATE_SIZE = 160
-MAX_TOKENS = 4
+# kMaxTokens in the source: the rows of one MTP verify step.
+MAX_TOKENS = 7
 # Marlin-repacked int32 weights, [experts, K/16, 2N] for 4-bit.
 W13_SHAPE = (NUM_EXPERTS, HIDDEN_SIZE // 16, 2 * 2 * INTERMEDIATE_SIZE)
 W2_SHAPE = (NUM_EXPERTS, INTERMEDIATE_SIZE // 16, 2 * HIDDEN_SIZE)
@@ -100,7 +101,7 @@ def sm70_nvfp4_moe_decode(
 ) -> torch.Tensor:
     """Gated-SiLU NVFP4 experts, weighted and summed over the top-10 routes.
 
-    hidden_states: FP16 [M, 2560], M <= 4. w13/w2: Marlin int32 weights;
+    hidden_states: FP16 [M, 2560], M <= MAX_TOKENS. w13/w2: Marlin int32 weights;
     scales: SM70-encoded E4M3 [E, K/16, N]; globals: FP32 [E]. topk_ids int32
     and topk_weights FP32, both [M, 10]; a negative id contributes nothing.
     """
@@ -140,7 +141,7 @@ def sm70_nvfp4_moe_decode(
 
 
 def sm70_topk10_softmax(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Softmax over 512 router logits, top 10 renormalized, for M <= 4 rows.
+    """Softmax over 512 router logits, top 10 renormalized, for M <= MAX_TOKENS rows.
 
     Returns (FP32 weights, int32 ids), both [M, 10]; ties pick the lower id.
     """

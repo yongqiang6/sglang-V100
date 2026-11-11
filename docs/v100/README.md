@@ -396,15 +396,15 @@ Also ported, with the fork's CUDA sources (clang-formatted only) behind new
 hooks in upstream's restructured code:
 
 - Dense GEMV and few-row GEMM (`kernels/ops/gemm/sm70_dense_gemv.py`): FP16
-  projections at one row, and at two or four rows for MTP verify, for the
+  projections at one row, and at two to seven rows for MTP verify, for the
   fork's measured TP4 shapes (attention and GDN projections, shared expert,
   router, LM head shard). `UnquantizedLinearMethod` and the LM head take them
   for bias-free, aligned inputs; other shapes stay on cuBLAS.
   `SGLANG_SM70_DENSE_GEMV=0` turns them off.
 - Hyper-connection mix (`sm70_hc_mix.py`): down projection with SiLU, then an
   up projection fusing sigmoid, multiply and the stream mean, in place of the
-  persistent Triton mix, which is pathologically slow on SM70. At two and four
-  rows the down projection also computes the combine's inject-gate partials.
+  persistent Triton mix, which is pathologically slow on SM70. From two rows
+  up the down projection also computes the combine's inject-gate partials.
 - Qwen projections (`sm70_qwen_fusions.py`): the shared expert's gate_up with
   SiLU-and-mul, the GDN qkvz + ba projections in one launch at decode, and at
   MTP verify both projections written straight into the split GDN inputs.
@@ -431,10 +431,20 @@ Two smaller pieces from the fork:
   graph, and not under speculative decoding, so an MTP deployment with CUDA
   graphs never takes it.
 
+MTP chains of two to seven draft tokens stay on these paths: the few-row GEMM,
+the hyper-connection mix and inject gates, the GDN projections and verify
+launch, the NVFP4 MoE kernel with its router, and the QSA split combine all
+take up to seven verify rows (`--speculative-num-steps` 1 to 6 with
+`--speculative-num-draft-tokens` one higher). The fork ran and measured two
+and four rows only; three and five to seven rows reuse the four-row launch
+configurations and are untested on a V100. Whether a longer chain is faster
+depends on the acceptance rate.
+
 On a 4x V100 PCIe server, upstream without any of the fork's
 decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
-3.05), against about 70 on the fork's image; this tree with the ported kernels
-has not been measured yet.
+3.05), against about 70 on the fork's image. With the ported kernels the same
+server was reported at about 65 tok/s single-stream (MTP 3 steps / 4 draft
+tokens, `NCCL_P2P_LEVEL=NVL`, so NCCL all-reduces went through host memory).
 
 ## Verification status
 

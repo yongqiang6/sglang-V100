@@ -1,4 +1,4 @@
-"""FP16 GEMV and two/four-row GEMM for V100 (SM70) decode and MTP verify.
+"""FP16 GEMV and two-to-seven-row GEMM for V100 (SM70) decode and MTP verify.
 
 From the sglang-V100 fork, measured on V100 at Qwen3.8 Flash Next's TP4
 shapes: one warp (or an 8/16-lane group) per output row with 16-byte loads and
@@ -59,6 +59,20 @@ _SMALL_GEMM_CONFIGS = {
     (2, 62080, 2560): (128, 32),
     (4, 62080, 2560): (128, 32),
 }
+# The row counts of one MTP verify step with two to seven draft tokens.
+MAX_VERIFY_ROWS = 7
+# Only two and four rows were measured; the others reuse the four-row launch,
+# which loads each weight vector once whatever the row count.
+_SMALL_GEMM_CONFIGS.update(
+    {
+        (rows, out_features, in_features): config
+        for (measured_rows, out_features, in_features), config in tuple(
+            _SMALL_GEMM_CONFIGS.items()
+        )
+        if measured_rows == 4
+        for rows in (3, 5, 6, MAX_VERIFY_ROWS)
+    }
+)
 
 
 @functools.lru_cache(maxsize=None)

@@ -320,8 +320,9 @@ class TestSm70MarlinV100(CustomTestCase):
 
             self.assertTrue(decode_case())
             self.assertTrue(decode_case(tokens=4))
+            self.assertTrue(decode_case(tokens=7))
             for label, rejected in {
-                "five tokens": decode_case(tokens=5),
+                "eight tokens": decode_case(tokens=8),
                 "bf16 router weights": decode_case(weight_dtype=torch.bfloat16),
                 "routed scaling": decode_case(config={"routed_scaling_factor": 2.5}),
                 "swiglu clamp": decode_case(config={"swiglu_limit": 7.0}),
@@ -338,8 +339,9 @@ class TestSm70MarlinV100(CustomTestCase):
                 self.assertFalse(rejected, label)
 
             self.assertTrue(topk_case())
+            self.assertTrue(topk_case(tokens=7))
             for label, rejected in {
-                "five tokens": topk_case(tokens=5),
+                "eight tokens": topk_case(tokens=8),
                 "top-8": topk_case(topk=8),
                 "no renormalize": topk_case(renormalize=False),
                 "correction bias": topk_case(bias=torch.zeros(512)),

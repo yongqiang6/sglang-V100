@@ -6,7 +6,7 @@ From the sglang-V100 fork, for the FP16 TP4 shapes (hidden 2560):
   SiLU-and-mul, one row.
 - ``qkv_ba``: the GDN layer's [4096, 2560] qkvz and [24, 2560] ba projections in
   one launch, one row.
-- ``qkvzba``: the same projections at two or four rows, written straight into
+- ``qkvzba``: the same projections at two to seven rows, written straight into
   the split qkv / z / b / a layout of a ratio-three GDN layer (12 value heads
   of 128 over 4 key heads per rank).
 """
@@ -16,7 +16,11 @@ from __future__ import annotations
 import torch
 
 from sglang.kernels.jit.utils import cache_once, load_jit
-from sglang.kernels.ops.gemm.sm70_dense_gemv import is_aligned_fp16, is_sm70
+from sglang.kernels.ops.gemm.sm70_dense_gemv import (
+    MAX_VERIFY_ROWS,
+    is_aligned_fp16,
+    is_sm70,
+)
 from sglang.srt.environ import envs
 
 HIDDEN_SIZE = 2560
@@ -72,7 +76,9 @@ def qkv_ba_supported(
 def qkvzba_supported(
     x: torch.Tensor, qkvz_weight: torch.Tensor, ba_weight: torch.Tensor
 ) -> bool:
-    return x.shape[0] in (2, 4) and _projections_supported(x, qkvz_weight, ba_weight)
+    return 2 <= x.shape[0] <= MAX_VERIFY_ROWS and _projections_supported(
+        x, qkvz_weight, ba_weight
+    )
 
 
 @cache_once
