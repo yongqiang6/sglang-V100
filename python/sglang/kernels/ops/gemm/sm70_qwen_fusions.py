@@ -20,6 +20,7 @@ from sglang.kernels.ops.gemm.sm70_dense_gemv import (
     MAX_VERIFY_ROWS,
     is_aligned_fp16,
     is_sm70,
+    verify_row_chunks,
 )
 from sglang.srt.environ import envs
 
@@ -76,7 +77,8 @@ def qkv_ba_supported(
 def qkvzba_supported(
     x: torch.Tensor, qkvz_weight: torch.Tensor, ba_weight: torch.Tensor
 ) -> bool:
-    return 2 <= x.shape[0] <= MAX_VERIFY_ROWS and _projections_supported(
+    max_rows = max(MAX_VERIFY_ROWS, envs.SGLANG_SM70_GDN_PROJ_MAX_ROWS.get())
+    return 2 <= x.shape[0] <= max_rows and _projections_supported(
         x, qkvz_weight, ba_weight
     )
 
@@ -134,11 +136,18 @@ def qkv_ba(
 def qkvzba(
     x: torch.Tensor, qkvz_weight: torch.Tensor, ba_weight: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The split (mixed_qkv, z, b, a) GDN inputs for two or four rows."""
+    """The split (mixed_qkv, z, b, a) GDN inputs, in launches of up to seven
+    rows."""
     rows = x.shape[0]
     qkv = torch.empty((rows, _QKV_WIDTH), dtype=x.dtype, device=x.device)
     z = torch.empty((rows, _V_HEADS * _HEAD_V_DIM), dtype=x.dtype, device=x.device)
     b = torch.empty((rows, _V_HEADS), dtype=x.dtype, device=x.device)
     a = torch.empty_like(b)
-    _qkvzba_module(rows).run(x, qkvz_weight, ba_weight, qkv, z, b, a)
+    start = 0
+    for count in verify_row_chunks(rows):
+        part = slice(start, start + count)
+        _qkvzba_module(count).run(
+            x[part], qkvz_weight, ba_weight, qkv[part], z[part], b[part], a[part]
+        )
+        start += count
     return qkv, z.view(rows, _V_HEADS, _HEAD_V_DIM), b, a

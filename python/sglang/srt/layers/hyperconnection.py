@@ -270,7 +270,7 @@ class GatedResidual(HyperConnectionBase):
         self, hyper_input_normed: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """The mixed input, and the inject-gate partials when combine() can
-        take them (two or four rows)."""
+        take them (two rows or more)."""
         from sglang.kernels.ops.gemm import sm70_hc_mix
 
         partials = None

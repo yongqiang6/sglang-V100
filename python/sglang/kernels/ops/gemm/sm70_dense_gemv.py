@@ -59,7 +59,8 @@ _SMALL_GEMM_CONFIGS = {
     (2, 62080, 2560): (128, 32),
     (4, 62080, 2560): (128, 32),
 }
-# The row counts of one MTP verify step with two to seven draft tokens.
+# The most rows one launch of the row-templated kernels takes: an MTP verify
+# step with seven draft tokens.
 MAX_VERIFY_ROWS = 7
 # Only two and four rows were measured; the others reuse the four-row launch,
 # which loads each weight vector once whatever the row count.
@@ -73,6 +74,18 @@ _SMALL_GEMM_CONFIGS.update(
         for rows in (3, 5, 6, MAX_VERIFY_ROWS)
     }
 )
+
+
+def verify_row_chunks(rows: int) -> tuple[int, ...]:
+    """The rows of each launch covering ``rows``: one launch up to
+    MAX_VERIFY_ROWS, else launches of three or four rows (four is the launch
+    the fork measured). Every kernel computes its rows independently, so the
+    chunking does not change any row's result."""
+    if rows <= MAX_VERIFY_ROWS:
+        return (rows,)
+    launches = -(-rows // 4)
+    base, extra = divmod(rows, launches)
+    return (base + 1,) * extra + (base,) * (launches - extra)
 
 
 @functools.lru_cache(maxsize=None)

@@ -130,7 +130,7 @@ def _use_sm70_nvfp4_decode(
     return (
         hidden_states.dtype == torch.float16
         and hidden_states.ndim == 2
-        and 1 <= num_tokens <= sm70.MAX_TOKENS
+        and 1 <= num_tokens <= sm70.max_tokens()
         and hidden_states.shape[1] == sm70.HIDDEN_SIZE
         and tuple(topk_ids.shape) == (num_tokens, sm70.TOP_K)
         and topk_ids.dtype == torch.int32

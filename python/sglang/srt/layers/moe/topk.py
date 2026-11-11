@@ -183,7 +183,7 @@ def _use_sm70_topk10_softmax(
     num_tokens = gating_output.shape[0]
     return (
         gating_output.ndim == 2
-        and 1 <= num_tokens <= sm70.MAX_TOKENS
+        and 1 <= num_tokens <= sm70.max_tokens()
         and gating_output.shape[1] == sm70.NUM_EXPERTS
         and gating_output.dtype in (torch.float16, torch.float32)
         and topk == sm70.TOP_K

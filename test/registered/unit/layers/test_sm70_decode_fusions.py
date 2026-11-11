@@ -131,12 +131,13 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 )
             )
             rejected = {
-                "hc eight rows": sm70_hc_mix.mix_supported(
-                    _CudaTensor(8, 10240), down, up
+                "hc 33 rows": sm70_hc_mix.mix_supported(
+                    _CudaTensor(33, 10240), down, up
                 ),
-                "hc gate eight rows": sm70_hc_mix.gate_supported(
-                    _CudaTensor(8, 10240), _CudaTensor(4, 10240)
+                "hc gate 33 rows": sm70_hc_mix.gate_supported(
+                    _CudaTensor(33, 10240), _CudaTensor(4, 10240)
                 ),
+                # GDN chunking is opt-in: cuBLAS reads the weights once.
                 "qkvzba eight rows": sm70_qwen_fusions.qkvzba_supported(
                     _CudaTensor(8, 2560), qkvz, ba
                 ),
@@ -161,8 +162,99 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 rejected["disabled"] = sm70_hc_mix.mix_supported(
                     _CudaTensor(1, 10240), down, up
                 )
+            # Several requests' verify rows run as chunked launches.
+            x16 = _CudaTensor(16, 10240)
+            self.assertTrue(sm70_hc_mix.mix_supported(x16, down, up))
+            self.assertTrue(sm70_hc_mix.gate_supported(x16, _CudaTensor(4, 10240)))
+            with envs.SGLANG_SM70_HC_MIX_MAX_ROWS.override(7):
+                rejected["hc capped"] = sm70_hc_mix.mix_supported(x16, down, up)
+                # The cap never drops below one launch's rows.
+                self.assertTrue(
+                    sm70_hc_mix.mix_supported(_CudaTensor(7, 10240), down, up)
+                )
+            with envs.SGLANG_SM70_HC_MIX_MAX_ROWS.override(64):
+                # The apply kernel's own bound still holds.
+                rejected["hc beyond the kernel bound"] = sm70_hc_mix.mix_supported(
+                    _CudaTensor(33, 10240), down, up
+                )
+            with envs.SGLANG_SM70_GDN_PROJ_MAX_ROWS.override(16):
+                self.assertTrue(
+                    sm70_qwen_fusions.qkvzba_supported(_CudaTensor(16, 2560), qkvz, ba)
+                )
+                rejected["qkvzba 17 rows"] = sm70_qwen_fusions.qkvzba_supported(
+                    _CudaTensor(17, 2560), qkvz, ba
+                )
         for label, accepted in rejected.items():
             self.assertFalse(accepted, label)
+
+    def test_chunked_launches_cover_every_row_once(self):
+        """Rows beyond one launch are split across launches that write into
+        slices of shared outputs; a wrong offset would leave rows unwritten or
+        written from another request's input."""
+        for rows in range(1, 33):
+            chunks = sm70_dense_gemv.verify_row_chunks(rows)
+            self.assertEqual(sum(chunks), rows)
+            self.assertLessEqual(max(chunks), sm70_dense_gemv.MAX_VERIFY_ROWS)
+            if rows >= 2:
+                # The inject-gate and GDN launches have no one-row form.
+                self.assertGreaterEqual(min(chunks), 2, rows)
+
+        launches = []
+
+        class RowWise:
+            """Stands in for a kernel module: each output row depends only on
+            its own input row."""
+
+            def __init__(self, count):
+                self.count = count
+
+            def _check(self, x):
+                self.assert_rows(x.shape[0], self.count)
+                launches.append(self.count)
+
+            def down(self, x, weight, *outputs):
+                self._check(x)
+                outputs[-2 if len(outputs) == 3 else -1].copy_(x[:, :320] + 1)
+                if len(outputs) == 3:
+                    outputs[-1].copy_(x[:, :32].reshape(-1, 8, 4).float())
+
+            def up(self, activated, x, weight, output):
+                self._check(x)
+                output.copy_(activated.repeat(1, 8) + x[:, :2560])
+
+            def run(self, x, w, t, qkv, z, b, a):
+                self._check(x)
+                qkv.copy_(x)
+                z.copy_(x[:, :1536] * 2)
+                b.copy_(x[:, :12] + 3)
+                a.copy_(x[:, :12] + 4)
+
+        RowWise.assert_rows = lambda _, got, want: self.assertEqual(got, want)
+        rows = 13
+        x = torch.arange(rows * 10240, dtype=torch.float32).reshape(rows, 10240)
+        with (
+            patch.object(sm70_hc_mix, "_module", RowWise),
+            patch.object(sm70_hc_mix, "_gate_module", RowWise),
+            patch.object(sm70_qwen_fusions, "_qkvzba_module", RowWise),
+        ):
+            activated = sm70_hc_mix.hc_down(x, None)
+            self.assertTrue(torch.equal(activated, x[:, :320] + 1))
+            self.assertTrue(
+                torch.equal(
+                    sm70_hc_mix.hc_up(activated, x, None),
+                    activated.repeat(1, 8) + x[:, :2560],
+                )
+            )
+            gated, partials = sm70_hc_mix.hc_down_with_gate(x, None, None)
+            self.assertTrue(torch.equal(gated, activated))
+            self.assertTrue(torch.equal(partials, x[:, :32].reshape(-1, 8, 4)))
+            hidden = x[:, :2560].contiguous()
+            qkv, z, b, a = sm70_qwen_fusions.qkvzba(hidden, None, None)
+            self.assertTrue(torch.equal(qkv, hidden))
+            self.assertTrue(torch.equal(z.flatten(1), hidden[:, :1536] * 2))
+            self.assertTrue(torch.equal(b, hidden[:, :12] + 3))
+            self.assertTrue(torch.equal(a, hidden[:, :12] + 4))
+        self.assertEqual(launches, [4, 3, 3, 3] * 4)
 
     def test_row_bounds_match_the_compiled_kernels(self):
         """Each kernel asserts its own row bound when it is built on a V100, so
@@ -186,7 +278,8 @@ class TestSm70DecodeFusionGates(CustomTestCase):
         ):
             self.assertEqual(bounds(path, r"M <= (\d+)\);"), rows, path)
         self.assertEqual(
-            bounds("elementwise/sm70_hc_gate.cuh", r"rows\.unwrap\(\) <= (\d+)"), rows
+            bounds("elementwise/sm70_hc_gate.cuh", r"rows\.unwrap\(\) <= (\d+)"),
+            {sm70_hc_mix.MAX_ROWS},
         )
         self.assertEqual(
             bounds("moe/sm70_nvfp4_moe_decode.cu", r"kMaxTokens = (\d+);"),

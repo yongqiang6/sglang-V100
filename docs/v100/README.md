@@ -440,6 +440,24 @@ and four rows only; three and five to seven rows reuse the four-row launch
 configurations and are untested on a V100. Whether a longer chain is faster
 depends on the acceptance rate.
 
+Concurrent requests multiply the verify rows (requests x draft tokens), past
+what one launch of those kernels takes. Three of them cover such batches, none
+measured on a V100 yet, each with a switch for A/B runs:
+
+- The NVFP4 MoE kernel and its router take up to 32 rows; they are indexed by
+  route, so they scale with the rows as Marlin does.
+  `SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS=7` restores Marlin above seven rows.
+- The hyper-connection mix and inject gates run rows above seven as launches
+  of three or four rows, in place of the persistent Triton mix. Each launch
+  re-reads the mix weights. `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns this off.
+- The GDN verify projections can run the same way, but stay off by default:
+  cuBLAS reads those weights once for the whole batch.
+  `SGLANG_SM70_GDN_PROJ_MAX_ROWS=32` tries it.
+
+The native QSA split combine also takes up to 32 rows. The few-row GEMM stays
+at seven rows; larger batches use cuBLAS. Chunked launches compute each row
+exactly as a single request's launch does.
+
 On a 4x V100 PCIe server, upstream without any of the fork's
 decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
 3.05), against about 70 on the fork's image. With the ported kernels the same

@@ -1259,14 +1259,22 @@ class Envs:
     # Native CUDA long-context decode partial; JIT build directory.
     SGLANG_V100_DECODE_CUDA = EnvBool(True)
     SGLANG_V100_DECODE_CUDA_BUILD_DIR = EnvStr("/tmp/sglang_sm70_longctx_decode")
-    # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape (M <= 4);
-    # built under SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
+    # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape; built under
+    # SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
     SGLANG_V100_NVFP4_MOE_DECODE = EnvBool(True)
+    # Rows that kernel takes (at most 32). Measured up to 4; 7 keeps batched
+    # MTP verify (requests x draft tokens) on Marlin.
+    SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS = EnvInt(32)
     # SM70 FP16 GEMV / two-four-row GEMM for decode and MTP verify projections.
     SGLANG_SM70_DENSE_GEMV = EnvBool(True)
     # SM70 Qwen3.8 decode fusions: HC mix and inject gates, GDN and shared-expert
     # projections, FP16 PLE gate/value.
     SGLANG_SM70_QWEN_FUSIONS = EnvBool(True)
+    # Rows the SM70 HC mix and GDN verify projections take; above 7 they run as
+    # 3-4 row launches, each re-reading the weights. Unmeasured: GDN stays off
+    # (cuBLAS reads its weights once), HC replaces the persistent Triton mix.
+    SGLANG_SM70_HC_MIX_MAX_ROWS = EnvInt(32)
+    SGLANG_SM70_GDN_PROJ_MAX_ROWS = EnvInt(7)
     # Greedy TP decoding exchanges one top-1 candidate per rank instead of the
     # vocabulary logits (eager steps only; see layers/greedy_tp_top1.py).
     SGLANG_V100_GREEDY_TP_TOP1 = EnvBool(False)

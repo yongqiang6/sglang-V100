@@ -29,14 +29,19 @@ NUM_EXPERTS = 512
 TOP_K = 10
 HIDDEN_SIZE = 2560
 INTERMEDIATE_SIZE = 160
-# kMaxTokens in the source: the rows of one MTP verify step.
-MAX_TOKENS = 7
+# kMaxTokens in the source: several requests' MTP verify rows.
+MAX_TOKENS = 32
 # Marlin-repacked int32 weights, [experts, K/16, 2N] for 4-bit.
 W13_SHAPE = (NUM_EXPERTS, HIDDEN_SIZE // 16, 2 * 2 * INTERMEDIATE_SIZE)
 W2_SHAPE = (NUM_EXPERTS, INTERMEDIATE_SIZE // 16, 2 * HIDDEN_SIZE)
 # Split counts of the gate/up and down partial kernels.
 _GATE_UP_SPLITS = 40
 _DOWN_SPLITS = 5
+
+
+def max_tokens() -> int:
+    """The most rows the kernels take in this process."""
+    return min(MAX_TOKENS, envs.SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS.get())
 
 
 def sm70_nvfp4_moe_decode_available() -> bool:
