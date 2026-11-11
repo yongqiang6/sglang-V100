@@ -1267,6 +1267,9 @@ class Envs:
     # SM70 Qwen3.8 decode fusions: HC mix and inject gates, GDN and shared-expert
     # projections, FP16 PLE gate/value.
     SGLANG_SM70_QWEN_FUSIONS = EnvBool(True)
+    # Greedy TP decoding exchanges one top-1 candidate per rank instead of the
+    # vocabulary logits (eager steps only; see layers/greedy_tp_top1.py).
+    SGLANG_V100_GREEDY_TP_TOP1 = EnvBool(False)
     SGLANG_SM70_QSA_COMBINE = EnvBool(True)
     # QSA (Qwen3.8 Flash Next): prefix-free prefills up to this many tokens, and
     # decode when the context limit fits it, run dense attention; 0 disables.

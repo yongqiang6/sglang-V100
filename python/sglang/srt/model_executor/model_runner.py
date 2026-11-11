@@ -2172,6 +2172,20 @@ class ModelRunner:
         # runners may reuse backing objects. Never leak an auxiliary result from
         # a previous replay into a request with no observer state.
         logits_output.auxiliary_device_output = None
+        if logits_output.greedy_token_ids is not None:
+            # Greedy TP top-1 already picked the tokens; there are no logits.
+            next_token_ids = logits_output.greedy_token_ids
+            if (c := self.canary_manager) is not None:
+                c.on_sampled(
+                    logits_output=logits_output,
+                    forward_batch=forward_batch,
+                    next_token_ids=next_token_ids,
+                )
+            self.ngram_embedding_manager.update_after_decode(
+                next_token_ids=next_token_ids,
+                forward_batch=forward_batch,
+            )
+            return next_token_ids
         observer = self.sampling_observer
         # Preserve two-argument overrides when observation is inactive.
         if observer is not None and observer.is_active(forward_batch.sampling_info):

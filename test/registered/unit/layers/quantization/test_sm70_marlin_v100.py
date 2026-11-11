@@ -21,6 +21,7 @@ from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.gptq.gptq import GPTQMarlinConfig
 from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config
 from sglang.srt.layers.quantization.utils import get_scalar_types, pack_cols
+from sglang.srt.utils.common import temp_set_env
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -345,6 +346,56 @@ class TestSm70MarlinV100(CustomTestCase):
                 "fused shared expert": topk_case(shared=1),
             }.items():
                 self.assertFalse(rejected, label)
+
+    def test_sm70_marlin_moe_prefill_tuning_is_scoped_to_its_shapes(self):
+        """marlin_v100 applies the geometry environment overrides to every MoE
+        launch, so the prefill tuning must be cleared before any other shape
+        runs, and overrides the user set must never be replaced."""
+        import os
+
+        names = sm70_marlin_v100._MOE_TUNING_ENV
+        fp4_scales = torch.empty(0, dtype=torch.float8_e4m3fn)
+
+        def launch(block, top_k, m, n, k):
+            sm70_marlin_v100._apply_moe_tuning(
+                sm70_marlin_v100.qwen38_nvfp4_prefill_moe_tuning(
+                    fp4_scales, block, top_k, m, n, k
+                )
+            )
+            return tuple(os.environ.get(name) for name in names)
+
+        with ExitStack() as stack:
+            stack.enter_context(temp_set_env(**{name: None for name in names}))
+            stack.enter_context(
+                patch.object(sm70_marlin_v100, "_active_moe_tuning", None)
+            )
+            stack.enter_context(
+                patch.object(sm70_marlin_v100, "_USER_MOE_TUNING", False)
+            )
+            gate_up = ("32x64x64x4x32x32x32", "1", "vector_words")
+            self.assertEqual(launch(32, 10, 1024, 320, 2560), gate_up)
+            # Decode gate/up keeps marlin_v100's compiled-in selection.
+            self.assertEqual(launch(8, 10, 1, 320, 2560), (None, None, None))
+            self.assertEqual(launch(32, 10, 1024, 320, 2560), gate_up)
+            self.assertEqual(
+                launch(64, 1, 81920, 2560, 160),
+                ("64x256x32x4x64x64x32", "1", "vector_words"),
+            )
+            self.assertEqual(launch(32, 10, 4096, 320, 2560), (None, None, None))
+            self.assertEqual(launch(64, 1, 20480, 2560, 160), (None, None, None))
+            self.assertIsNone(
+                sm70_marlin_v100.qwen38_nvfp4_prefill_moe_tuning(
+                    torch.empty(0, dtype=torch.float16), 32, 10, 1024, 320, 2560
+                ),
+                "FP16-scaled (non-NVFP4) weights",
+            )
+
+            stack.enter_context(temp_set_env(**{names[0]: "user-choice"}))
+            stack.enter_context(
+                patch.object(sm70_marlin_v100, "_USER_MOE_TUNING", True)
+            )
+            self.assertEqual(launch(32, 10, 1024, 320, 2560)[0], "user-choice")
+            self.assertEqual(launch(8, 10, 1, 320, 2560)[0], "user-choice")
 
     def test_fp8_marlin_on_sm70_requires_marlin_v100(self):
         """FP8 checkpoints load on SM70 only as weight-only Marlin, which needs

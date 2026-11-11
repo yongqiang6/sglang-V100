@@ -13,7 +13,7 @@ what still needs a V100 to validate.
 | 4 | GDN: TileLang linear-attention backend, Triton chunk retune, FP16 Mamba state on SM70 | Done |
 | 5 | Quantization: Marlin-V100 GPTQ/AWQ/FP8; TurboMind FP16 MoE, block-FP8 W8A16 and AWQ W4A16; QPN8 FP8 decode | Done |
 | 6 | Speculative decoding on upstream DFlash v2 / DSpark | Done (TileLang native verify not ported) |
-| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (fork decode kernels ported; Marlin geometry and top-1 logits not ported) |
+| 7 | Qwen3.8 Flash Next (QSA, PLE, NVFP4), PCIe custom all-reduce, MiniMax-H3 on V100 | Done (fork decode kernels, prefill Marlin geometry and greedy TP top-1 ported) |
 
 ## Why CUDA 12.8 with torch cu126
 
@@ -414,8 +414,24 @@ hooks in upstream's restructured code:
 `SGLANG_SM70_QWEN_FUSIONS=0` turns off the last three. Left out on purpose:
 the fork's shared-expert gate kernel (upstream fuses that gate already) and
 its GDN QKV-prefix reuse (upstream's fused ratio-three split replaces it).
-Not ported yet: the fork's per-shape Marlin geometry and its greedy TP top-1
-logits path. On a 4x V100 PCIe server, upstream without any of the fork's
+Two smaller pieces from the fork:
+
+- Prefill MoE geometry (`sm70_marlin_v100.py`): two NVFP4 prefill shapes, the
+  512 to 2048 token gate/up GEMM and the down GEMM of a 4096-token chunk, launch
+  with the fork's tuned CTA geometry through marlin_v100's
+  `SM70_MARLIN_MOE_*` overrides, cleared again for every other shape. Decode
+  shapes already use the geometry compiled into marlin_v100. Setting any of
+  those variables yourself turns this off.
+- Greedy TP top-1 (`layers/greedy_tp_top1.py`, opt-in with
+  `SGLANG_V100_GREEDY_TP_TOP1=1`): when every request is greedy and nothing
+  reads the logits (no logprobs, penalties, grammar, logit bias or custom
+  processor), each TP rank exchanges its best (logit, token id) pair instead
+  of all-gathering the vocabulary logits. The result is the exact argmax, with
+  the lowest id on ties. It runs on eager steps only, never inside a CUDA
+  graph, and not under speculative decoding, so an MTP deployment with CUDA
+  graphs never takes it.
+
+On a 4x V100 PCIe server, upstream without any of the fork's
 decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
 3.05), against about 70 on the fork's image; this tree with the ported kernels
 has not been measured yet.

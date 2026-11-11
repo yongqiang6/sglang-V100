@@ -135,6 +135,69 @@ def marlin_gemm(
     )
 
 
+# marlin_v100 reads these overrides of its MoE kernel geometry at host launch;
+# a captured CUDA graph keeps whatever was chosen at capture time.
+_MOE_TUNING_ENV = (
+    "SM70_MARLIN_MOE_CTA_GEOMETRY",
+    "SM70_MARLIN_MOE_SPLIT_K",
+    "SM70_MARLIN_MOE_METADATA_CACHE",
+)
+# Overrides the user set at startup apply to every MoE call; never replace them.
+_USER_MOE_TUNING = any(os.environ.get(name) for name in _MOE_TUNING_ENV)
+_active_moe_tuning: Optional[tuple[str, str, str]] = None
+
+
+def qwen38_nvfp4_prefill_moe_tuning(
+    b_scales: torch.Tensor,
+    moe_block_size: int,
+    top_k: int,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+) -> Optional[tuple[str, str, str]]:
+    """(CTA geometry, split-K, metadata) the sglang-V100 fork measured on V100
+    for Qwen3.8 Flash Next's TP4 NVFP4 prefill MoE GEMMs, or None.
+
+    marlin_v100's compiled-in selector already holds the fork's decode
+    geometries; these two prefill shapes are not in it.
+    """
+    if b_scales.dtype != torch.float8_e4m3fn:
+        return None
+    # gate/up of roughly 1K-token chunks: [M, 2560] x [2560, 320], top-10 routes.
+    if (
+        moe_block_size == 32
+        and top_k == 10
+        and 512 <= size_m <= 2048
+        and size_n == 320
+        and size_k == 2560
+    ):
+        return ("32x64x64x4x32x32x32", "1", "vector_words")
+    # down of chunks from 4K tokens: the routed rows [M * 10, 160] x [160, 2560].
+    if (
+        moe_block_size == 64
+        and top_k == 1
+        and size_m >= 40960
+        and size_n == 2560
+        and size_k == 160
+    ):
+        return ("64x256x32x4x64x64x32", "1", "vector_words")
+    return None
+
+
+def _apply_moe_tuning(tuning: Optional[tuple[str, str, str]]) -> None:
+    """Point marlin_v100 at ``tuning``, or clear the overrides for None."""
+    global _active_moe_tuning
+    if _USER_MOE_TUNING or tuning == _active_moe_tuning:
+        return
+    if tuning is None:
+        for name in _MOE_TUNING_ENV:
+            os.environ.pop(name, None)
+    else:
+        for name, value in zip(_MOE_TUNING_ENV, tuning):
+            os.environ[name] = value
+    _active_moe_tuning = tuning
+
+
 def moe_wna16_marlin_gemm(
     a: torch.Tensor,
     c: torch.Tensor,
@@ -163,6 +226,11 @@ def moe_wna16_marlin_gemm(
 ) -> torch.Tensor:
     """Blocks whose expert id is negative are skipped and their rows of ``c``
     are left untouched; only ``num_tokens_post_padded[0]`` is read."""
+    _apply_moe_tuning(
+        qwen38_nvfp4_prefill_moe_tuning(
+            b_scales, moe_block_size, top_k, size_m, size_n, size_k
+        )
+    )
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
         a,
         c,

@@ -37,7 +37,7 @@ from sglang.kernels.ops.sampling.softcap_row_argmax import softcap_row_argmax
 from sglang.srt.beam_search.logits_capture import BeamLogitsCapture
 from sglang.srt.distributed.device_communicators import triton_symm_mem_ag
 from sglang.srt.environ import envs
-from sglang.srt.layers import layernorm_sp
+from sglang.srt.layers import greedy_tp_top1, layernorm_sp
 from sglang.srt.layers.aux_hidden_states import AuxHiddenStates, pack_aux_hidden_states
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
@@ -265,6 +265,9 @@ class LogitsProcessorOutput:
     # The logits of the next tokens.       shape: [#seq, vocab_size]
     # Can be None for certain prefill-only requests (e.g., multi-item scoring) that don't need next token generation
     next_token_logits: Optional[torch.Tensor]
+    # Greedy TP top-1 (greedy_tp_top1.py): the exact global argmax ids, set
+    # instead of next_token_logits; ModelRunner.sample returns them as is.
+    greedy_token_ids: Optional[torch.Tensor] = None
     # Used by speculative decoding (EAGLE)
     # The last hidden layers
     hidden_states: Optional[torch.Tensor] = None
@@ -378,6 +381,7 @@ class LogitsMetadata:
     forward_mode: ForwardMode
     capture_hidden_mode: CaptureHiddenMode = CaptureHiddenMode.NULL
     next_token_logits_buffer: Optional[torch.Tensor] = None
+    use_greedy_tp_top1: bool = False
 
     extend_return_logprob: bool = False
     extend_return_top_logprob: bool = False
@@ -462,6 +466,7 @@ class LogitsMetadata:
             forward_mode=forward_mode,
             capture_hidden_mode=forward_batch.capture_hidden_mode,
             next_token_logits_buffer=forward_batch.next_token_logits_buffer,
+            use_greedy_tp_top1=greedy_tp_top1.is_strict_greedy_batch(forward_batch),
             extend_return_logprob=extend_return_logprob,
             extend_return_top_logprob=extend_return_top_logprob,
             extend_token_ids_logprob=extend_token_ids_logprob,
@@ -692,6 +697,25 @@ class LogitsProcessor(nn.Module):
             hidden_states, aux_hidden_states, logits_metadata
         )
         del hidden_states
+
+        if self._can_use_greedy_tp_top1(pruned_states, lm_head, logits_metadata):
+            sampled_states = (
+                pruned_states[sample_indices]
+                if sample_indices is not None
+                else pruned_states
+            )
+            return LogitsProcessorOutput(
+                next_token_logits=None,
+                greedy_token_ids=greedy_tp_top1.greedy_tp_top1(
+                    sampled_states,
+                    lm_head,
+                    self._compute_lm_head,
+                    get_parallel().tp_size,
+                ),
+                hidden_states=hidden_states_to_store,
+                last_hidden_states=last_hidden_states_to_store,
+                mm_input_embeds=logits_metadata.mm_input_embeds,
+            )
 
         if not logits_metadata.extend_return_logprob:
             # Compute logits for both input and sampled tokens.
@@ -1013,6 +1037,29 @@ class LogitsProcessor(nn.Module):
                 "likely cause."
             )
         self._aux_hidden_states_checked = True
+
+    def _can_use_greedy_tp_top1(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        logits_metadata: LogitsMetadata,
+    ) -> bool:
+        """The opt-in batch gate plus everything here that alters the logits."""
+        return (
+            logits_metadata.use_greedy_tp_top1
+            and self.do_tensor_parallel_all_gather
+            and not self.do_tensor_parallel_all_gather_dp_attn
+            and not self.use_attn_tp_group
+            and not self.use_fp32_lm_head
+            and not self.use_fp32_lm_head_output
+            and not self.return_full_logits
+            and self.logit_scale is None
+            and self.final_logit_softcapping is None
+            and self.rl_on_policy_target is None
+            and logits_metadata.next_token_logits_buffer is None
+            and greedy_tp_top1.lm_head_supported(hidden_states, lm_head)
+            and not should_apply_lm_head_quant_method(lm_head, lm_head.quant_method)
+        )
 
     def _get_logits(
         self,

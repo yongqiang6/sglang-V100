@@ -1,6 +1,7 @@
-"""Dispatch of the V100 (SM70) decode kernels for Qwen3.8 Flash Next. Each
-kernel hard-codes one layout and ignores bias, strides and other dtypes, so the
-gates must refuse every input it would compute wrongly."""
+"""Dispatch of the V100 (SM70) decode kernels for Qwen3.8 Flash Next and the
+opt-in greedy TP top-1 exchange. Each fast path hard-codes one layout or skips
+work other consumers need, so the gates must refuse every input it would
+compute wrongly."""
 
 import unittest
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import torch
 from sglang.kernels.ops.elementwise import qwen4_gate
 from sglang.kernels.ops.gemm import sm70_dense_gemv, sm70_hc_mix, sm70_qwen_fusions
 from sglang.srt.environ import envs
+from sglang.srt.layers import greedy_tp_top1
 from sglang.srt.layers.hyperconnection import GatedResidual
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.models.qwen3_5 import Qwen3_5GatedDeltaNet
@@ -176,6 +178,104 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 ),
                 ("sm70", None),
             )
+
+    def test_greedy_tp_top1_matches_the_gathered_argmax(self):
+        """Exchanging one candidate per rank must give the argmax of the full
+        gathered logits: padding rows ignored, the lower id on a tie between
+        ranks, and ids past FP16 precision exact through the FP32 exchange."""
+        shard_rows, padded_rows = 5, 6
+        # Rank 1 starts past 2048, where FP16 no longer holds odd integers.
+        shard_starts = (0, 37985)
+        hidden = torch.zeros(3, 1)
+        full = torch.tensor(
+            [
+                [0.1, 0.9, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.0],
+                [0.0, 0.1, 0.2, 0.3, 0.7, 0.7, 0.1, 0.2, 0.3, 0.4],
+                [-3.0, -2.0, -4.0, -5.0, -6.0, -1.0, -7.0, -8.0, -9.0, -1.5],
+            ],
+            dtype=torch.float16,
+        )
+        candidates = []
+        for rank, start in enumerate(shard_starts):
+            shard = SimpleNamespace(
+                org_vocab_start_index=start, num_org_elements=shard_rows
+            )
+            lm_head = SimpleNamespace(shard_indices=shard)
+            local = torch.full((3, padded_rows), 100.0, dtype=torch.float16)
+            local[:, :shard_rows] = full[:, rank * shard_rows : (rank + 1) * shard_rows]
+            candidates.append(
+                greedy_tp_top1.local_top1_candidates(
+                    hidden, lm_head, lambda states, head, local=local: local
+                )
+            )
+        ids = greedy_tp_top1.pick_global_top1(
+            torch.cat(candidates, -1), len(shard_starts)
+        )
+        expected = [
+            shard_starts[col // shard_rows] + col % shard_rows
+            for col in full.float().argmax(-1).tolist()
+        ]
+        self.assertEqual(expected, [1, 4, 37985])
+        self.assertEqual(ids.tolist(), expected)
+
+    def test_greedy_tp_top1_only_for_batches_nothing_else_reads(self):
+        def batch(**overrides):
+            sampling = dict(
+                is_all_greedy=True,
+                grammars=None,
+                has_custom_logit_processor=False,
+                logit_bias=None,
+                vocab_mask=None,
+                acc_additive_penalties=None,
+                acc_scaling_penalties=None,
+                penalizer_orchestrator=SimpleNamespace(is_required=False),
+                has_watermark_candidates=False,
+            )
+            fields = dict(
+                is_prefill_only=False,
+                forward_mode=ForwardMode.DECODE,
+                spec_algorithm=None,
+                global_num_tokens_cpu=None,
+                return_logprob=False,
+                top_logprobs_nums=None,
+                token_ids_logprobs=None,
+            )
+            for key, value in overrides.items():
+                (sampling if key in sampling else fields)[key] = value
+            return SimpleNamespace(sampling_info=SimpleNamespace(**sampling), **fields)
+
+        self.assertFalse(greedy_tp_top1.is_strict_greedy_batch(batch()), "opt-in")
+        with envs.SGLANG_V100_GREEDY_TP_TOP1.override(True):
+            self.assertTrue(greedy_tp_top1.is_strict_greedy_batch(batch()))
+            self.assertTrue(
+                greedy_tp_top1.is_strict_greedy_batch(
+                    batch(forward_mode=ForwardMode.EXTEND)
+                )
+            )
+            rejected = {
+                "sampling": dict(is_all_greedy=False),
+                "logprobs": dict(return_logprob=True),
+                "top logprobs": dict(top_logprobs_nums=[0, 2]),
+                "token logprobs": dict(token_ids_logprobs=[None, [3]]),
+                "verify": dict(forward_mode=ForwardMode.TARGET_VERIFY),
+                "speculative": dict(
+                    spec_algorithm=SimpleNamespace(is_none=lambda: False)
+                ),
+                "MLP-sync padding": dict(global_num_tokens_cpu=[1, 1]),
+                "prefill only": dict(is_prefill_only=True),
+                "grammar": dict(grammars=[None, object()]),
+                "penalties": dict(
+                    penalizer_orchestrator=SimpleNamespace(is_required=True)
+                ),
+                "logit bias": dict(logit_bias=torch.zeros(1)),
+                "vocab mask": dict(vocab_mask=torch.zeros(1)),
+                "custom processor": dict(has_custom_logit_processor=True),
+                "watermark": dict(has_watermark_candidates=True),
+            }
+            for label, overrides in rejected.items():
+                self.assertFalse(
+                    greedy_tp_top1.is_strict_greedy_batch(batch(**overrides)), label
+                )
 
     def test_gdn_verify_split_only_for_target_verify_ratio_three(self):
         """The fused split writes the ratio-three [Q, K, V | Z | B | A] layout;
