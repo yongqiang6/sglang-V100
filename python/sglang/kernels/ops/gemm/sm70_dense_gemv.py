@@ -76,14 +76,12 @@ _SMALL_GEMM_CONFIGS.update(
 )
 
 
-def verify_row_chunks(rows: int) -> tuple[int, ...]:
-    """The rows of each launch covering ``rows``: one launch up to
-    MAX_VERIFY_ROWS, else launches of three or four rows (four is the launch
-    the fork measured). Every kernel computes its rows independently, so the
-    chunking does not change any row's result."""
-    if rows <= MAX_VERIFY_ROWS:
-        return (rows,)
-    launches = -(-rows // 4)
+def verify_row_chunks(rows: int, launch_rows: int = MAX_VERIFY_ROWS) -> tuple[int, ...]:
+    """The rows of each launch covering ``rows`` with at most ``launch_rows``
+    each, in as few and as even launches as that allows: a launch costs one
+    pass over the weights whatever its rows. Every kernel computes its rows
+    independently, so the chunking does not change any row's result."""
+    launches = max(1, -(-rows // launch_rows))
     base, extra = divmod(rows, launches)
     return (base + 1,) * extra + (base,) * (launches - extra)
 

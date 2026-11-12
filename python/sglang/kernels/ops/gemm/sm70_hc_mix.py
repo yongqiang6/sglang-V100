@@ -1,9 +1,9 @@
 """Hyper-connection mix and inject gates for V100 (SM70) decode and MTP verify.
 
 From the sglang-V100 fork, for Qwen3.8 Flash Next's FP16 shape (4 streams of
-2560, low rank 320) at one to seven rows per launch; more rows (several
-requests' verify steps) run as launches of three or four. The persistent Triton
-mix is pathologically slow on SM70; these kernels split it into a down projection with
+2560, low rank 320) at up to 16 rows per launch; more rows (several requests'
+verify steps) run as several launches. The persistent Triton mix is
+pathologically slow on SM70; these kernels split it into a down projection with
 SiLU and an up projection that fuses sigmoid, multiply and the stream mean,
 keeping the eager FP16 rounding points. From two rows up the down projection
 also computes the combine's inject-gate partial dots.
@@ -30,10 +30,19 @@ _ROW_SIZE = HC_COUNT * HIDDEN_SIZE
 _GATE_SPLITS = 8
 # The row bound of sm70_hc_gate.cuh's apply kernel.
 MAX_ROWS = 32
+# The row bound the down and up kernels are templated to in sm70_hc_batch.cuh.
+MAX_LAUNCH_ROWS = 16
 
 
 def _max_rows() -> int:
     return max(MAX_VERIFY_ROWS, min(MAX_ROWS, envs.SGLANG_SM70_HC_MIX_MAX_ROWS.get()))
+
+
+def _launch_rows() -> int:
+    return max(
+        MAX_VERIFY_ROWS,
+        min(MAX_LAUNCH_ROWS, envs.SGLANG_SM70_HC_MIX_LAUNCH_ROWS.get()),
+    )
 
 
 def mix_supported(
@@ -113,7 +122,7 @@ def _module(rows: int):
 
 def _row_slices(rows: int):
     start = 0
-    for count in verify_row_chunks(rows):
+    for count in verify_row_chunks(rows, _launch_rows()):
         yield slice(start, start + count)
         start += count
 
@@ -160,6 +169,6 @@ def hc_apply_gate(
     """residual + 2 * sigmoid(gate / HC_COUNT) * block_output, per stream."""
     output = torch.empty_like(residual)
     # One launch for every row: only the down projection is row-templated.
-    first_launch_rows = verify_row_chunks(block_output.shape[0])[0]
+    first_launch_rows = verify_row_chunks(block_output.shape[0], _launch_rows())[0]
     _gate_module(first_launch_rows).apply(block_output, residual, partials, output)
     return output

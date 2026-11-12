@@ -12,7 +12,7 @@ void down(
     tvm::ffi::TensorView inject,
     tvm::ffi::TensorView o,
     tvm::ffi::TensorView partials) {
-  static_assert(M >= 2 && M <= 7);
+  static_assert(M >= 2 && M <= 16);
   using namespace host;
   auto dev = SymbolicDevice{};
   dev.set_options<kDLCUDA>();

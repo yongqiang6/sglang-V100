@@ -191,13 +191,16 @@ class TestSm70DecodeFusionGates(CustomTestCase):
         """Rows beyond one launch are split across launches that write into
         slices of shared outputs; a wrong offset would leave rows unwritten or
         written from another request's input."""
-        for rows in range(1, 33):
-            chunks = sm70_dense_gemv.verify_row_chunks(rows)
-            self.assertEqual(sum(chunks), rows)
-            self.assertLessEqual(max(chunks), sm70_dense_gemv.MAX_VERIFY_ROWS)
-            if rows >= 2:
-                # The inject-gate and GDN launches have no one-row form.
-                self.assertGreaterEqual(min(chunks), 2, rows)
+        for launch_rows in (7, 8, 16):
+            for rows in range(1, 33):
+                chunks = sm70_dense_gemv.verify_row_chunks(rows, launch_rows)
+                self.assertEqual(sum(chunks), rows)
+                self.assertLessEqual(max(chunks), launch_rows)
+                # Each launch re-reads the weights, so use as few as fit.
+                self.assertEqual(len(chunks), -(-rows // launch_rows))
+                if rows >= 2:
+                    # The inject-gate and GDN launches have no one-row form.
+                    self.assertGreaterEqual(min(chunks), 2, rows)
 
         launches = []
 
@@ -254,7 +257,22 @@ class TestSm70DecodeFusionGates(CustomTestCase):
             self.assertTrue(torch.equal(z.flatten(1), hidden[:, :1536] * 2))
             self.assertTrue(torch.equal(b, hidden[:, :12] + 3))
             self.assertTrue(torch.equal(a, hidden[:, :12] + 4))
-        self.assertEqual(launches, [4, 3, 3, 3] * 4)
+        # Hyper-connection launches hold eight rows by default, GDN seven.
+        self.assertEqual(launches, [7, 6] * 4)
+
+        def hc_launches(launch_rows, rows=13):
+            del launches[:]
+            with (
+                patch.object(sm70_hc_mix, "_module", RowWise),
+                envs.SGLANG_SM70_HC_MIX_LAUNCH_ROWS.override(launch_rows),
+            ):
+                sm70_hc_mix.hc_down(torch.zeros(rows, 10240), None)
+            return list(launches)
+
+        self.assertEqual(hc_launches(16), [13])
+        # The setting is held to what the kernels are templated for.
+        self.assertEqual(hc_launches(64, rows=20), [10, 10])
+        self.assertEqual(hc_launches(4), [7, 6])
 
     def test_row_bounds_match_the_compiled_kernels(self):
         """Each kernel asserts its own row bound when it is built on a V100, so
@@ -270,13 +288,12 @@ class TestSm70DecodeFusionGates(CustomTestCase):
             return found
 
         rows = {sm70_dense_gemv.MAX_VERIFY_ROWS}
-        for path in (
-            "gemm/sm70_small_gemm.cuh",
-            "gemm/sm70_qwen_gdn.cuh",
-            "elementwise/sm70_hc_batch.cuh",
-            "elementwise/sm70_hc_gate.cuh",
-        ):
+        for path in ("gemm/sm70_small_gemm.cuh", "gemm/sm70_qwen_gdn.cuh"):
             self.assertEqual(bounds(path, r"M <= (\d+)\);"), rows, path)
+        for path in ("elementwise/sm70_hc_batch.cuh", "elementwise/sm70_hc_gate.cuh"):
+            self.assertEqual(
+                bounds(path, r"M <= (\d+)\);"), {sm70_hc_mix.MAX_LAUNCH_ROWS}, path
+            )
         self.assertEqual(
             bounds("elementwise/sm70_hc_gate.cuh", r"rows\.unwrap\(\) <= (\d+)"),
             {sm70_hc_mix.MAX_ROWS},

@@ -1270,11 +1270,15 @@ class Envs:
     # SM70 Qwen3.8 decode fusions: HC mix and inject gates, GDN and shared-expert
     # projections, FP16 PLE gate/value.
     SGLANG_SM70_QWEN_FUSIONS = EnvBool(True)
-    # Rows the SM70 HC mix and GDN verify projections take; above 7 they run as
-    # 3-4 row launches, each re-reading the weights. Unmeasured: GDN stays off
-    # (cuBLAS reads its weights once), HC replaces the persistent Triton mix.
+    # Rows the SM70 HC mix and GDN verify projections take, in several launches
+    # when one cannot hold them; each launch re-reads the weights. GDN stays off
+    # past one launch (cuBLAS reads its weights once), HC replaces the
+    # persistent Triton mix.
     SGLANG_SM70_HC_MIX_MAX_ROWS = EnvInt(32)
     SGLANG_SM70_GDN_PROJ_MAX_ROWS = EnvInt(7)
+    # Rows per HC mix launch, 7 to 16. At 4 rows the launches were bandwidth
+    # bound on V100 (4 requests x 4 draft tokens); 8 and 16 are unmeasured.
+    SGLANG_SM70_HC_MIX_LAUNCH_ROWS = EnvInt(8)
     # Greedy TP decoding exchanges one top-1 candidate per rank instead of the
     # vocabulary logits (eager steps only; see layers/greedy_tp_top1.py).
     SGLANG_V100_GREEDY_TP_TOP1 = EnvBool(False)

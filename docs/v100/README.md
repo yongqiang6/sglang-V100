@@ -447,9 +447,12 @@ measured on a V100 yet, each with a switch for A/B runs:
 - The NVFP4 MoE kernel and its router take up to 32 rows; they are indexed by
   route, so they scale with the rows as Marlin does.
   `SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS=7` restores Marlin above seven rows.
-- The hyper-connection mix and inject gates run rows above seven as launches
-  of three or four rows, in place of the persistent Triton mix. Each launch
-  re-reads the mix weights. `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns this off.
+- The hyper-connection mix and inject gates take up to 32 rows, in place of
+  the persistent Triton mix, as launches of up to
+  `SGLANG_SM70_HC_MIX_LAUNCH_ROWS` rows (8 by default, 16 at most). Each
+  launch re-reads the mix weights: with four-row launches a profile of 4
+  requests x 4 draft tokens on V100 spent a quarter of its GPU time there.
+  `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns the batched path off.
 - The GDN verify projections can run the same way, but stay off by default:
   cuBLAS reads those weights once for the whole batch.
   `SGLANG_SM70_GDN_PROJ_MAX_ROWS=32` tries it.
@@ -457,6 +460,11 @@ measured on a V100 yet, each with a switch for A/B runs:
 The native QSA split combine also takes up to 32 rows. The few-row GEMM stays
 at seven rows; larger batches use cuBLAS. Chunked launches compute each row
 exactly as a single request's launch does.
+
+With the MoE, hyper-connection and QSA paths above (four-row hyper-connection
+launches), 4 concurrent requests were reported at 239 tok/s on 4x V100 PCIe,
+against 131 tok/s single-stream; the decode step was GPU-bound, with NCCL
+all-reduces another 14% of it.
 
 On a 4x V100 PCIe server, upstream without any of the fork's
 decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
