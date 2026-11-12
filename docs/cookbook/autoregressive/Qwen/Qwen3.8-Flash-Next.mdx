@@ -111,10 +111,8 @@ sglang serve \
   gather per layer on V100. `SGLANG_SM70_QSA_DENSE_PREFILL_MAX_TOKENS` sets the
   limit, and `0` keeps every prefill sparse.
 - **Target only.** Drop the four `--speculative-*` flags.
-- **Longer MTP chain.** The V100 verify kernels take up to seven draft tokens
-  (`--speculative-num-steps 6 --speculative-num-draft-tokens 7`). Only the
-  3-step / 4-token chain above was measured on V100; try a longer one when the
-  logged accept length sits close to the draft-token count.
+- **MTP length.** Four draft tokens is the most this model takes: QSA rejects
+  `--speculative-num-draft-tokens` above its compress ratio (4).
 
 </Accordion>
 

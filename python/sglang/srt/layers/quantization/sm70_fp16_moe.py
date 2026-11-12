@@ -29,8 +29,7 @@ logger = logging.getLogger(__name__)
 # Decode batches up to this many tokens reuse per-layer buffers (CUDA-graph
 # friendly); larger prefill batches allocate transiently, since retaining a
 # prefill-sized set per MoE layer exhausts VRAM before the first request.
-# 64 covers 8 requests x 7 draft tokens; 6 x 6 = 36 rows, allocating
-# transiently, failed on V100 with a CUDA invalid-argument error.
+# 64 covers 16 requests x 4 draft tokens, the most QSA verifies per request.
 _PERSISTENT_MAX_TOKENS = 64
 # Buffer leading dims: per token, per routed (token, expert) slot, or whole.
 _TOKEN_ROWS = (

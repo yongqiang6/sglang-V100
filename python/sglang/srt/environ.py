@@ -1262,7 +1262,7 @@ class Envs:
     # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape; built under
     # SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
     SGLANG_V100_NVFP4_MOE_DECODE = EnvBool(True)
-    # Rows that kernel takes (at most 64: 8 requests x 7 draft tokens fit).
+    # Rows that kernel takes (at most 64: 16 requests x 4 draft tokens).
     # Measured at 4 and 16; 7 keeps batched MTP verify on Marlin.
     SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS = EnvInt(64)
     # SM70 FP16 GEMV / two-four-row GEMM for decode and MTP verify projections.

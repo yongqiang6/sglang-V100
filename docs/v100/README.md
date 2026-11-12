@@ -434,14 +434,15 @@ Two smaller pieces from the fork:
   graph, and not under speculative decoding, so an MTP deployment with CUDA
   graphs never takes it.
 
-MTP chains of two to seven draft tokens stay on these paths: the few-row GEMM,
-the hyper-connection mix and inject gates, the GDN projections and verify
-launch, the NVFP4 MoE kernel with its router, and the QSA split combine all
-take up to seven verify rows (`--speculative-num-steps` 1 to 6 with
-`--speculative-num-draft-tokens` one higher). The fork ran and measured two
-and four rows only; three and five to seven rows reuse the four-row launch
-configurations and are untested on a V100. Whether a longer chain is faster
-depends on the acceptance rate.
+Verify steps of two to seven rows stay on these paths in one launch: the
+few-row GEMM, the hyper-connection mix and inject gates, the GDN projections
+and verify launch, the NVFP4 MoE kernel with its router, and the QSA split
+combine. Rows are requests times draft tokens. QSA rejects more draft tokens
+than its compress ratio, so Qwen3.8 Flash Next stops at four
+(`--speculative-num-steps 3 --speculative-num-draft-tokens 4`); the other row
+counts come from fewer draft tokens or several requests. The fork ran and
+measured two and four rows only; the others reuse the four-row launch
+configurations.
 
 Concurrent requests multiply the verify rows (requests x draft tokens), past
 what one launch of those kernels takes. Three of them cover such batches, none
@@ -466,11 +467,9 @@ measured on a V100 yet, each with a switch for A/B runs:
   `SGLANG_SM70_GDN_PROJ_MAX_ROWS=32` tries it.
 
 The native QSA split combine also takes up to 64 rows, and the draft's FP16
-MoE keeps buffers for as many. The limit was 32 until 6 requests x 6 draft
-tokens (36 rows) failed on V100 with a CUDA invalid-argument error; whether 64
-cures that is not confirmed. The few-row GEMM stays at seven rows; larger
-batches use cuBLAS. Chunked launches compute each row exactly as a single
-request's launch does.
+MoE keeps buffers for as many, which is 16 requests x 4 draft tokens. The
+few-row GEMM stays at seven rows; larger batches use cuBLAS. Chunked launches
+compute each row exactly as a single request's launch does.
 
 With the MoE, hyper-connection and QSA paths above (four-row hyper-connection
 launches), 4 concurrent requests were reported at 239 tok/s on 4x V100 PCIe,

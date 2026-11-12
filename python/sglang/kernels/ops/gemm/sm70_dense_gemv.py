@@ -59,8 +59,8 @@ _SMALL_GEMM_CONFIGS = {
     (2, 62080, 2560): (128, 32),
     (4, 62080, 2560): (128, 32),
 }
-# The most rows one launch of the row-templated kernels takes: an MTP verify
-# step with seven draft tokens.
+# The most rows one launch of the row-templated kernels takes. Rows are
+# requests x draft tokens; QSA caps the draft tokens at four.
 MAX_VERIFY_ROWS = 7
 # Only two and four rows were measured; the others reuse the four-row launch,
 # which loads each weight vector once whatever the row count.
