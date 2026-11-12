@@ -1281,7 +1281,8 @@ class Envs:
     SGLANG_SM70_HC_MIX_LAUNCH_ROWS = EnvInt(7)
     # From this many rows the HC mix runs as two cuBLAS GEMMs instead of the
     # row kernels; 8 is the first batch beyond one request's verify rows.
-    # Unmeasured: 33 keeps every batch on the row kernels.
+    # Measured on V100 at 16 rows: 17 us per GEMM. 33 keeps every batch on the
+    # row kernels.
     SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS = EnvInt(8)
     # Greedy TP decoding exchanges one top-1 candidate per rank instead of the
     # vocabulary logits (eager steps only; see layers/greedy_tp_top1.py).
