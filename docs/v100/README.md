@@ -329,6 +329,9 @@ step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
   `CustomAllReduceV2` to one-shot push for messages up to
   `SGLANG_CUSTOM_AR_PCIE_MAX_BYTES` (128 KiB, decode-sized); pull and two-shot
   modes are off and larger messages use NCCL. Off by default, as in the fork.
+  Until the fix that made the opt-in reach `CustomAllReduceV2`, setting it
+  only logged a line and all-reduces stayed on NCCL; the communicator has not
+  yet run on a V100 in this tree.
 - MiniMax-H3 (`multimodal_gen`):
   - On SM70, `validate_server_args` runs every BF16 component (DiT, VAEs, text
     encoders) in FP16 and keeps FP32 ones; an explicit BF16

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from sglang.srt.distributed.device_communicators import custom_all_reduce_v2
+from sglang.srt.environ import envs
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=6, suite="base-a-test-cpu")
@@ -130,3 +131,31 @@ def test_pcie_config_selects_only_one_shot_push():
         assert heuristic.one_shot_pull_threshold == 0
         assert heuristic.two_shot_pull_threshold == 0
         assert heuristic.mc.max_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("full_nvlink", "allow_pcie", "expected"),
+    [
+        (False, False, False),
+        (False, True, True),
+        # A failed P2P test or an unsupported group stays off whatever is set.
+        (None, True, False),
+        (True, False, True),
+    ],
+)
+def test_pcie_opt_in_enables_the_communicator(
+    monkeypatch, full_nvlink, allow_pcie, expected
+):
+    """SGLANG_CUSTOM_AR_ALLOW_PCIE must turn the communicator on for GPUs that
+    pass the P2P test without NVLink. It used to log that it would and then
+    stay on NCCL, with no warning."""
+    group, device = _patch_group(monkeypatch, world_size=4, same_node=True)
+    monkeypatch.setattr(
+        custom_all_reduce_v2,
+        "can_use_custom_all_reduce_with_nvlink",
+        lambda **kwargs: full_nvlink,
+    )
+    with envs.SGLANG_CUSTOM_AR_ALLOW_PCIE.override(allow_pcie):
+        assert (
+            custom_all_reduce_v2.can_use_custom_all_reduce_v2(group, device) is expected
+        )

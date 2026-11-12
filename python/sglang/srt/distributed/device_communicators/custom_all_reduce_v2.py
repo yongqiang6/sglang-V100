@@ -160,7 +160,8 @@ class CustomAllReduceV2:
         priority and override all of the size parameters above.
         """
         self.disabled = True
-        if not can_use_custom_all_reduce_v2(group=group, device=device):
+        full_nvlink = _full_nvlink(group=group, device=device)
+        if not _usable(full_nvlink):
             return
 
         self.group = group
@@ -191,11 +192,16 @@ class CustomAllReduceV2:
             graph=force_thresholds(base_config.graph),
             eager=force_thresholds(base_config.eager),
         )
-        if envs.SGLANG_CUSTOM_AR_ALLOW_PCIE.get():
+        if not full_nvlink:
+            # Reached only with SGLANG_CUSTOM_AR_ALLOW_PCIE; NVLink hosts keep
+            # their own algorithms and sizes when it is set.
+            byte_cap = envs.SGLANG_CUSTOM_AR_PCIE_MAX_BYTES.get()
+            if byte_cap <= 0 or byte_cap % 16:
+                raise ValueError(
+                    "SGLANG_CUSTOM_AR_PCIE_MAX_BYTES must be a positive multiple of 16"
+                )
             max_pull_size = 0
-            max_push_size = min(
-                max_push_size, envs.SGLANG_CUSTOM_AR_PCIE_MAX_BYTES.get()
-            )
+            max_push_size = min(max_push_size, byte_cap)
             base_config = pcie_one_shot_push_config(base_config, max_push_size)
         # Zero on either pull knob opts out of the pull half entirely: no
         # pull plane at all, and every pull algo disabled below by clipping
@@ -605,19 +611,32 @@ class CustomAllReduceV2:
         self.close()
 
 
-def can_use_custom_all_reduce_v2(
-    group: ProcessGroup,
-    device: torch.device,
-) -> bool:
+def _full_nvlink(group: ProcessGroup, device: torch.device) -> Optional[bool]:
+    """Whether the group's GPUs are all NVLink peers; None when the group
+    cannot run this communicator at all (size, topology or failed P2P)."""
     supported = get_supported_world_sizes()
     if dist.get_world_size(group=group) not in supported:
-        return False
+        return None
     if not all(in_the_same_node_as(group, source_rank=0)):
-        return is_one_nvlink_clique(group, device)
-    full_nvlink = can_use_custom_all_reduce_with_nvlink(
+        return True if is_one_nvlink_clique(group, device) else None
+    return can_use_custom_all_reduce_with_nvlink(
         group=group,
         device=device,
         supported_world_size=list(supported),
         cls_name="CustomAllReduceV2",
     )
-    return full_nvlink is True
+
+
+def _usable(full_nvlink: Optional[bool]) -> bool:
+    # Without NVLink the P2P test has still passed; the opt-in then selects
+    # the PCIe configuration (one-shot push only).
+    return full_nvlink is not None and (
+        full_nvlink or envs.SGLANG_CUSTOM_AR_ALLOW_PCIE.get()
+    )
+
+
+def can_use_custom_all_reduce_v2(
+    group: ProcessGroup,
+    device: torch.device,
+) -> bool:
+    return _usable(_full_nvlink(group=group, device=device))
