@@ -1276,9 +1276,13 @@ class Envs:
     # persistent Triton mix.
     SGLANG_SM70_HC_MIX_MAX_ROWS = EnvInt(32)
     SGLANG_SM70_GDN_PROJ_MAX_ROWS = EnvInt(7)
-    # Rows per HC mix launch, 7 to 16. At 4 rows the launches were bandwidth
-    # bound on V100 (4 requests x 4 draft tokens); 8 and 16 are unmeasured.
-    SGLANG_SM70_HC_MIX_LAUNCH_ROWS = EnvInt(8)
+    # Rows per launch of the HC mix row kernels, 7 to 16. Measured on V100 at
+    # 4 requests x 4 draft tokens: 8 us per row and mix at 4 rows, 10 at 16.
+    SGLANG_SM70_HC_MIX_LAUNCH_ROWS = EnvInt(7)
+    # From this many rows the HC mix runs as two cuBLAS GEMMs instead of the
+    # row kernels; 8 is the first batch beyond one request's verify rows.
+    # Unmeasured: 33 keeps every batch on the row kernels.
+    SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS = EnvInt(8)
     # Greedy TP decoding exchanges one top-1 candidate per rank instead of the
     # vocabulary logits (eager steps only; see layers/greedy_tp_top1.py).
     SGLANG_V100_GREEDY_TP_TOP1 = EnvBool(False)

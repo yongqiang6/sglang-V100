@@ -273,6 +273,14 @@ class GatedResidual(HyperConnectionBase):
         take them (two rows or more)."""
         from sglang.kernels.ops.gemm import sm70_hc_mix
 
+        if sm70_hc_mix.use_gemm(hyper_input_normed.shape[0]):
+            # combine() computes its own gates for these batches.
+            mixed_input = sm70_hc_mix.hc_mix_gemm(
+                hyper_input_normed,
+                self.input_mix_weight_down.weight,
+                self.input_mix_weight_up.weight,
+            )
+            return mixed_input, None
         partials = None
         if self._sm70_inject_gate and sm70_hc_mix.gate_supported(
             hyper_input_normed, self.block_inject_weight.weight

@@ -257,7 +257,7 @@ class TestSm70DecodeFusionGates(CustomTestCase):
             self.assertTrue(torch.equal(z.flatten(1), hidden[:, :1536] * 2))
             self.assertTrue(torch.equal(b, hidden[:, :12] + 3))
             self.assertTrue(torch.equal(a, hidden[:, :12] + 4))
-        # Hyper-connection launches hold eight rows by default, GDN seven.
+        # One launch holds seven rows by default.
         self.assertEqual(launches, [7, 6] * 4)
 
         def hc_launches(launch_rows, rows=13):
@@ -273,6 +273,45 @@ class TestSm70DecodeFusionGates(CustomTestCase):
         # The setting is held to what the kernels are templated for.
         self.assertEqual(hc_launches(64, rows=20), [10, 10])
         self.assertEqual(hc_launches(4), [7, 6])
+
+    def test_batched_hc_mix_runs_as_gemms(self):
+        """Batches beyond one request's verify rows take two GEMMs; the result
+        must be the mix the row kernels define, with weight_up's rows taken
+        stream-major, and combine() must then compute its own gates."""
+        torch.manual_seed(0)
+        rows = 9
+        x = torch.randn(rows, 10240).half()
+        down = (torch.randn(320, 10240) / 100).half()
+        up = (torch.randn(10240, 320) / 4).half()
+        activated = torch.nn.functional.silu(x.double() @ down.double().T / 4)
+        gate = torch.sigmoid(activated @ up.double().T)
+        expected = (gate.view(rows, 4, 2560) * x.double().view(rows, 4, 2560)).mean(1)
+        mixed = sm70_hc_mix.hc_mix_gemm(x, down, up)
+        self.assertEqual(mixed.dtype, torch.float16)
+        self.assertEqual(tuple(mixed.shape), (rows, 2560))
+        self.assertLess((mixed.double() - expected).abs().max().item(), 5e-3)
+        # The other pairing of gate and stream is far outside rounding.
+        swapped = (
+            gate.view(rows, 2560, 4).transpose(1, 2) * x.double().view(rows, 4, 2560)
+        ).mean(1)
+        self.assertGreater((swapped - expected).abs().max().item(), 0.2)
+
+        self.assertTrue(sm70_hc_mix.use_gemm(8))
+        self.assertFalse(sm70_hc_mix.use_gemm(7))
+        with envs.SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS.override(33):
+            self.assertFalse(sm70_hc_mix.use_gemm(32))
+
+        layer = SimpleNamespace(
+            _sm70_inject_gate=True,
+            input_mix_weight_down=SimpleNamespace(weight=down),
+            input_mix_weight_up=SimpleNamespace(weight=up),
+            block_inject_weight=SimpleNamespace(weight=_CudaTensor(4, 10240)),
+        )
+        with patch.object(sm70_hc_mix, "hc_down_with_gate") as row_kernels:
+            result, partials = GatedResidual._sm70_mix_forward(layer, x)
+        row_kernels.assert_not_called()
+        self.assertIsNone(partials)
+        self.assertTrue(torch.equal(result, mixed))
 
     def test_row_bounds_match_the_compiled_kernels(self):
         """Each kernel asserts its own row bound when it is built on a V100, so

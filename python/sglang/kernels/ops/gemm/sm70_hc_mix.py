@@ -1,17 +1,22 @@
 """Hyper-connection mix and inject gates for V100 (SM70) decode and MTP verify.
 
 From the sglang-V100 fork, for Qwen3.8 Flash Next's FP16 shape (4 streams of
-2560, low rank 320) at up to 16 rows per launch; more rows (several requests'
-verify steps) run as several launches. The persistent Triton mix is
+2560, low rank 320) at up to 16 rows per launch. The persistent Triton mix is
 pathologically slow on SM70; these kernels split it into a down projection with
 SiLU and an up projection that fuses sigmoid, multiply and the stream mean,
 keeping the eager FP16 rounding points. From two rows up the down projection
 also computes the combine's inject-gate partial dots.
+
+These kernels accumulate on CUDA cores and cost about 8 us per row and mix on
+V100, whatever the rows per launch (measured at 4 and 16). Batches of several
+requests' verify rows therefore run ``hc_mix_gemm``: the two projections as
+cuBLAS FP16 GEMMs, which use the tensor cores with FP32 accumulation.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 from sglang.kernels.jit.utils import cache_once, load_jit
 from sglang.kernels.ops.gemm.sm70_dense_gemv import (
@@ -43,6 +48,29 @@ def _launch_rows() -> int:
         MAX_VERIFY_ROWS,
         min(MAX_LAUNCH_ROWS, envs.SGLANG_SM70_HC_MIX_LAUNCH_ROWS.get()),
     )
+
+
+def use_gemm(rows: int) -> bool:
+    """Whether ``rows`` take ``hc_mix_gemm`` rather than the row kernels."""
+    return rows >= envs.SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS.get()
+
+
+def hc_mix_gemm(
+    x: torch.Tensor, weight_down: torch.Tensor, weight_up: torch.Tensor
+) -> torch.Tensor:
+    """The mix of ``hc_down`` and ``hc_up`` through two GEMMs, [rows, HIDDEN_SIZE].
+
+    Each projection is rounded to FP16 where the row kernels round theirs; the
+    sums inside differ in order, and the gate product and stream mean round in
+    FP16 as eager PyTorch does.
+    """
+    rows = x.shape[0]
+    activated = F.silu(F.linear(x, weight_down) * (1.0 / HC_COUNT))
+    gate = torch.sigmoid(F.linear(activated, weight_up))
+    # weight_up's rows are stream-major, as x is.
+    return (
+        gate.view(rows, HC_COUNT, HIDDEN_SIZE) * x.view(rows, HC_COUNT, HIDDEN_SIZE)
+    ).mean(dim=1)
 
 
 def mix_supported(

@@ -330,8 +330,8 @@ step is the fork's SM70 deltas on top of it. MiniMax-H3 is a diffusion model
   `SGLANG_CUSTOM_AR_PCIE_MAX_BYTES` (128 KiB, decode-sized); pull and two-shot
   modes are off and larger messages use NCCL. Off by default, as in the fork.
   Until the fix that made the opt-in reach `CustomAllReduceV2`, setting it
-  only logged a line and all-reduces stayed on NCCL; the communicator has not
-  yet run on a V100 in this tree.
+  only logged a line and all-reduces stayed on NCCL. It has since run on 4x
+  V100 PCIe (one-shot push inside CUDA graphs).
 - MiniMax-H3 (`multimodal_gen`):
   - On SM70, `validate_server_args` runs every BF16 component (DiT, VAEs, text
     encoders) in FP16 and keeps FP32 ones; an explicit BF16
@@ -450,12 +450,16 @@ measured on a V100 yet, each with a switch for A/B runs:
 - The NVFP4 MoE kernel and its router take up to 32 rows; they are indexed by
   route, so they scale with the rows as Marlin does.
   `SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS=7` restores Marlin above seven rows.
-- The hyper-connection mix and inject gates take up to 32 rows, in place of
-  the persistent Triton mix, as launches of up to
-  `SGLANG_SM70_HC_MIX_LAUNCH_ROWS` rows (8 by default, 16 at most). Each
-  launch re-reads the mix weights: with four-row launches a profile of 4
-  requests x 4 draft tokens on V100 spent a quarter of its GPU time there.
-  `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns the batched path off.
+- The hyper-connection mix takes up to 32 rows, in place of the persistent
+  Triton mix. From 8 rows (`SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS`) it runs as two
+  cuBLAS FP16 GEMMs, which use the tensor cores with FP32 accumulation, and
+  the combine computes its own gates. The row kernels accumulate on CUDA
+  cores: profiles of 4 requests x 4 draft tokens on V100 put them at about
+  8 us per row and mix in 4-row launches and 10 us in 16-row launches, a
+  quarter to a third of the GPU time. `SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS=33`
+  keeps batches on the row kernels (`SGLANG_SM70_HC_MIX_LAUNCH_ROWS` rows per
+  launch, 7 to 16), and `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns the batched
+  path off. The GEMM path is unmeasured.
 - The GDN verify projections can run the same way, but stay off by default:
   cuBLAS reads those weights once for the whole batch.
   `SGLANG_SM70_GDN_PROJ_MAX_ROWS=32` tries it.
@@ -467,7 +471,8 @@ exactly as a single request's launch does.
 With the MoE, hyper-connection and QSA paths above (four-row hyper-connection
 launches), 4 concurrent requests were reported at 239 tok/s on 4x V100 PCIe,
 against 131 tok/s single-stream; the decode step was GPU-bound, with NCCL
-all-reduces another 14% of it.
+all-reduces another 14% of it. With `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` working,
+those all-reduces dropped from 68 to 30 us each (16 rows, 80 KB).
 
 On a 4x V100 PCIe server, upstream without any of the fork's
 decode work ran Qwen3.8 Flash Next at about 38 tok/s with MTP (accept length
