@@ -32,7 +32,7 @@ constexpr int kGroupSize = 16;
 constexpr int kSplitK = 40;
 constexpr int kDownSplitK = 5;
 // Several requests' MTP verify rows; every kernel below is indexed by route.
-constexpr int kMaxTokens = 32;
+constexpr int kMaxTokens = 64;
 // At batch one, 256 threads give gate/up only 63 CTAs for 80 Volta SMs.
 // Two warps per CTA expose 250 CTAs without changing the reduction order.
 constexpr int kThreads = 64;
@@ -437,7 +437,7 @@ void decode(
   TORCH_CHECK(
       input.is_cuda() && input.scalar_type() == at::kHalf && input.dim() == 2 && input.size(0) >= 1 &&
           input.size(0) <= kMaxTokens && input.size(1) == kHidden,
-      "input must be CUDA FP16 [M, 2560], 1 <= M <= 32");
+      "input must be CUDA FP16 [M, 2560], 1 <= M <= 64");
   const int batch_size = static_cast<int>(input.size(0));
   const int num_routes = batch_size * kTopK;
   TORCH_CHECK(w13.is_cuda() && w13.scalar_type() == at::kInt, "w13 must be CUDA int32 Marlin weights");
@@ -504,7 +504,7 @@ void topk10_softmax(torch::Tensor logits, torch::Tensor topk_weights, torch::Ten
   TORCH_CHECK(
       logits.is_cuda() && logits.is_contiguous() && logits.dim() == 2 && logits.size(0) >= 1 &&
           logits.size(0) <= kMaxTokens && logits.size(1) == kExperts,
-      "logits must be contiguous CUDA [M, 512], 1 <= M <= 32");
+      "logits must be contiguous CUDA [M, 512], 1 <= M <= 64");
   const int batch_size = static_cast<int>(logits.size(0));
   TORCH_CHECK(logits.scalar_type() == at::kHalf || logits.scalar_type() == at::kFloat, "logits must be FP16 or FP32");
   TORCH_CHECK(

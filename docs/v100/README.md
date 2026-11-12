@@ -447,16 +447,16 @@ Concurrent requests multiply the verify rows (requests x draft tokens), past
 what one launch of those kernels takes. Three of them cover such batches, none
 measured on a V100 yet, each with a switch for A/B runs:
 
-- The NVFP4 MoE kernel and its router take up to 32 rows; they are indexed by
+- The NVFP4 MoE kernel and its router take up to 64 rows; they are indexed by
   route, so they scale with the rows as Marlin does.
   `SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS=7` restores Marlin above seven rows.
-- The hyper-connection mix takes up to 32 rows, in place of the persistent
+- The hyper-connection mix takes up to 64 rows, in place of the persistent
   Triton mix. From 8 rows (`SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS`) it runs as two
   cuBLAS FP16 GEMMs, which use the tensor cores with FP32 accumulation, and
   the combine computes its own gates. The row kernels accumulate on CUDA
   cores: profiles of 4 requests x 4 draft tokens on V100 put them at about
   8 us per row and mix in 4-row launches and 10 us in 16-row launches, a
-  quarter to a third of the GPU time. `SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS=33`
+  quarter to a third of the GPU time. `SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS=65`
   keeps batches on the row kernels (`SGLANG_SM70_HC_MIX_LAUNCH_ROWS` rows per
   launch, 7 to 16), and `SGLANG_SM70_HC_MIX_MAX_ROWS=7` turns the batched
   path off. On the same V100 workload the GEMMs took about 17 us each, and
@@ -465,9 +465,12 @@ measured on a V100 yet, each with a switch for A/B runs:
   cuBLAS reads those weights once for the whole batch.
   `SGLANG_SM70_GDN_PROJ_MAX_ROWS=32` tries it.
 
-The native QSA split combine also takes up to 32 rows. The few-row GEMM stays
-at seven rows; larger batches use cuBLAS. Chunked launches compute each row
-exactly as a single request's launch does.
+The native QSA split combine also takes up to 64 rows, and the draft's FP16
+MoE keeps buffers for as many. The limit was 32 until 6 requests x 6 draft
+tokens (36 rows) failed on V100 with a CUDA invalid-argument error; whether 64
+cures that is not confirmed. The few-row GEMM stays at seven rows; larger
+batches use cuBLAS. Chunked launches compute each row exactly as a single
+request's launch does.
 
 With the MoE, hyper-connection and QSA paths above (four-row hyper-connection
 launches), 4 concurrent requests were reported at 239 tok/s on 4x V100 PCIe,

@@ -43,7 +43,7 @@ void apply(
   TensorMatcher({rows, 2560}).with_dtype<half>().with_device(dev).verify(y);
   TensorMatcher({rows, 10240}).with_dtype<half>().with_device(dev).verify(residual).verify(output);
   TensorMatcher({rows, 8, 4}).with_dtype<float>().with_device(dev).verify(partials);
-  RuntimeCheck(rows.unwrap() >= 2 && rows.unwrap() <= 32, "Expected two to 32 rows");
+  RuntimeCheck(rows.unwrap() >= 2 && rows.unwrap() <= 64, "Expected two to 64 rows");
   RuntimeCheck(
       reinterpret_cast<uintptr_t>(y.data_ptr()) % 16 == 0 &&
           reinterpret_cast<uintptr_t>(residual.data_ptr()) % 16 == 0 &&

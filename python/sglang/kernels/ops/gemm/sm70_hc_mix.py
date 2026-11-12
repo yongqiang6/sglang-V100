@@ -34,7 +34,7 @@ _ROW_SIZE = HC_COUNT * HIDDEN_SIZE
 # The inject-gate partials: [rows, split, HC_COUNT] FP32, hc_combine's layout.
 _GATE_SPLITS = 8
 # The row bound of sm70_hc_gate.cuh's apply kernel.
-MAX_ROWS = 32
+MAX_ROWS = 64
 # The row bound the down and up kernels are templated to in sm70_hc_batch.cuh.
 MAX_LAUNCH_ROWS = 16
 

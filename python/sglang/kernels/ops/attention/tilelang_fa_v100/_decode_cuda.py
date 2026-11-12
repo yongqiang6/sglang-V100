@@ -31,7 +31,7 @@ PAGE_SIZE = 16  # fixed page granularity supported by the CUDA kernel
 QSA_DECODE_TARGET_CTAS = 160
 QSA_DECODE_TOKENS_PER_SPLIT = 32
 # The batch bound in sm70_qsa_combine.cuh: several requests' verify rows.
-_NATIVE_COMBINE_MAX_BATCH = 32
+_NATIVE_COMBINE_MAX_BATCH = 64
 
 
 def sm70_cuda_decode_enabled() -> bool:

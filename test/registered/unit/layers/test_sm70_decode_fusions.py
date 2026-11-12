@@ -131,11 +131,11 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 )
             )
             rejected = {
-                "hc 33 rows": sm70_hc_mix.mix_supported(
-                    _CudaTensor(33, 10240), down, up
+                "hc 65 rows": sm70_hc_mix.mix_supported(
+                    _CudaTensor(65, 10240), down, up
                 ),
-                "hc gate 33 rows": sm70_hc_mix.gate_supported(
-                    _CudaTensor(33, 10240), _CudaTensor(4, 10240)
+                "hc gate 65 rows": sm70_hc_mix.gate_supported(
+                    _CudaTensor(65, 10240), _CudaTensor(4, 10240)
                 ),
                 # GDN chunking is opt-in: cuBLAS reads the weights once.
                 "qkvzba eight rows": sm70_qwen_fusions.qkvzba_supported(
@@ -165,6 +165,8 @@ class TestSm70DecodeFusionGates(CustomTestCase):
             # Several requests' verify rows run as chunked launches.
             x16 = _CudaTensor(16, 10240)
             self.assertTrue(sm70_hc_mix.mix_supported(x16, down, up))
+            # 6 requests x 6 draft tokens.
+            self.assertTrue(sm70_hc_mix.mix_supported(_CudaTensor(36, 10240), down, up))
             self.assertTrue(sm70_hc_mix.gate_supported(x16, _CudaTensor(4, 10240)))
             with envs.SGLANG_SM70_HC_MIX_MAX_ROWS.override(7):
                 rejected["hc capped"] = sm70_hc_mix.mix_supported(x16, down, up)
@@ -172,10 +174,10 @@ class TestSm70DecodeFusionGates(CustomTestCase):
                 self.assertTrue(
                     sm70_hc_mix.mix_supported(_CudaTensor(7, 10240), down, up)
                 )
-            with envs.SGLANG_SM70_HC_MIX_MAX_ROWS.override(64):
+            with envs.SGLANG_SM70_HC_MIX_MAX_ROWS.override(128):
                 # The apply kernel's own bound still holds.
                 rejected["hc beyond the kernel bound"] = sm70_hc_mix.mix_supported(
-                    _CudaTensor(33, 10240), down, up
+                    _CudaTensor(65, 10240), down, up
                 )
             with envs.SGLANG_SM70_GDN_PROJ_MAX_ROWS.override(16):
                 self.assertTrue(
@@ -192,7 +194,7 @@ class TestSm70DecodeFusionGates(CustomTestCase):
         slices of shared outputs; a wrong offset would leave rows unwritten or
         written from another request's input."""
         for launch_rows in (7, 8, 16):
-            for rows in range(1, 33):
+            for rows in range(1, 65):
                 chunks = sm70_dense_gemv.verify_row_chunks(rows, launch_rows)
                 self.assertEqual(sum(chunks), rows)
                 self.assertLessEqual(max(chunks), launch_rows)
@@ -298,8 +300,8 @@ class TestSm70DecodeFusionGates(CustomTestCase):
 
         self.assertTrue(sm70_hc_mix.use_gemm(8))
         self.assertFalse(sm70_hc_mix.use_gemm(7))
-        with envs.SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS.override(33):
-            self.assertFalse(sm70_hc_mix.use_gemm(32))
+        with envs.SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS.override(65):
+            self.assertFalse(sm70_hc_mix.use_gemm(64))
 
         layer = SimpleNamespace(
             _sm70_inject_gate=True,

@@ -322,13 +322,13 @@ class TestSm70MarlinV100(CustomTestCase):
             self.assertTrue(decode_case())
             self.assertTrue(decode_case(tokens=4))
             # Several requests' verify rows; the kernels are indexed by route.
-            self.assertTrue(decode_case(tokens=32))
+            self.assertTrue(decode_case(tokens=64))
             with envs.SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS.override(7):
                 self.assertTrue(decode_case(tokens=7))
                 self.assertFalse(decode_case(tokens=8))
                 self.assertFalse(topk_case(tokens=8))
             for label, rejected in {
-                "33 tokens": decode_case(tokens=33),
+                "65 tokens": decode_case(tokens=65),
                 "bf16 router weights": decode_case(weight_dtype=torch.bfloat16),
                 "routed scaling": decode_case(config={"routed_scaling_factor": 2.5}),
                 "swiglu clamp": decode_case(config={"swiglu_limit": 7.0}),
@@ -345,9 +345,9 @@ class TestSm70MarlinV100(CustomTestCase):
                 self.assertFalse(rejected, label)
 
             self.assertTrue(topk_case())
-            self.assertTrue(topk_case(tokens=32))
+            self.assertTrue(topk_case(tokens=64))
             for label, rejected in {
-                "33 tokens": topk_case(tokens=33),
+                "65 tokens": topk_case(tokens=65),
                 "top-8": topk_case(topk=8),
                 "no renormalize": topk_case(renormalize=False),
                 "correction bias": topk_case(bias=torch.zeros(512)),

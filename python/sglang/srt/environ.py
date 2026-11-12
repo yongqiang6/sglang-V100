@@ -1262,9 +1262,9 @@ class Envs:
     # NVFP4 MoE decode kernel for Qwen3.8 Flash Next's TP4 shape; built under
     # SGLANG_V100_DECODE_CUDA_BUILD_DIR. Off falls back to Marlin.
     SGLANG_V100_NVFP4_MOE_DECODE = EnvBool(True)
-    # Rows that kernel takes (at most 32). Measured up to 4; 7 keeps batched
-    # MTP verify (requests x draft tokens) on Marlin.
-    SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS = EnvInt(32)
+    # Rows that kernel takes (at most 64: 8 requests x 7 draft tokens fit).
+    # Measured at 4 and 16; 7 keeps batched MTP verify on Marlin.
+    SGLANG_V100_NVFP4_MOE_DECODE_MAX_TOKENS = EnvInt(64)
     # SM70 FP16 GEMV / two-four-row GEMM for decode and MTP verify projections.
     SGLANG_SM70_DENSE_GEMV = EnvBool(True)
     # SM70 Qwen3.8 decode fusions: HC mix and inject gates, GDN and shared-expert
@@ -1274,14 +1274,14 @@ class Envs:
     # when one cannot hold them; each launch re-reads the weights. GDN stays off
     # past one launch (cuBLAS reads its weights once), HC replaces the
     # persistent Triton mix.
-    SGLANG_SM70_HC_MIX_MAX_ROWS = EnvInt(32)
+    SGLANG_SM70_HC_MIX_MAX_ROWS = EnvInt(64)
     SGLANG_SM70_GDN_PROJ_MAX_ROWS = EnvInt(7)
     # Rows per launch of the HC mix row kernels, 7 to 16. Measured on V100 at
     # 4 requests x 4 draft tokens: 8 us per row and mix at 4 rows, 10 at 16.
     SGLANG_SM70_HC_MIX_LAUNCH_ROWS = EnvInt(7)
     # From this many rows the HC mix runs as two cuBLAS GEMMs instead of the
     # row kernels; 8 is the first batch beyond one request's verify rows.
-    # Measured on V100 at 16 rows: 17 us per GEMM. 33 keeps every batch on the
+    # Measured on V100 at 16 rows: 17 us per GEMM. 65 keeps every batch on the
     # row kernels.
     SGLANG_SM70_HC_MIX_GEMM_MIN_ROWS = EnvInt(8)
     # Greedy TP decoding exchanges one top-1 candidate per rank instead of the

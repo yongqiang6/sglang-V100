@@ -30,7 +30,7 @@ TOP_K = 10
 HIDDEN_SIZE = 2560
 INTERMEDIATE_SIZE = 160
 # kMaxTokens in the source: several requests' MTP verify rows.
-MAX_TOKENS = 32
+MAX_TOKENS = 64
 # Marlin-repacked int32 weights, [experts, K/16, 2N] for 4-bit.
 W13_SHAPE = (NUM_EXPERTS, HIDDEN_SIZE // 16, 2 * 2 * INTERMEDIATE_SIZE)
 W2_SHAPE = (NUM_EXPERTS, INTERMEDIATE_SIZE // 16, 2 * HIDDEN_SIZE)
